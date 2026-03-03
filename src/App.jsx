@@ -37,15 +37,19 @@ async function callAPI(systemPrompt, userPrompt) {
   return res.json();
 }
 
-async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage) {
+async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, uploadedTemplate) {
   const prs = new pptxgen();
   prs.layout = "LAYOUT_WIDE";
+  const hasTmpl = uploadedTemplate && uploadedTemplate.type === "pptx";
+
   for (const section of sections) {
     const sd = data[section.id] || {};
     if (section.isDivider) {
       const slide = prs.addSlide();
       slide.background = { color: tmpl.primary };
-      if (selectedImage) slide.addImage({ path: selectedImage, x:0, y:0, w:"100%", h:"100%", transparency:70 });
+      if (selectedImage) {
+        try { slide.addImage({ data: selectedImage, x:0, y:0, w:"100%", h:"100%", transparency:75 }); } catch(e) {}
+      }
       slide.addShape(prs.ShapeType.rect, { x:0, y:2, w:"100%", h:1.5, fill:{ color: tmpl.accent } });
       slide.addText(section.label, { x:1, y:2.1, w:8, h:0.7, fontSize:32, bold:true, color:"FFFFFF", align:"center" });
       slide.addText(section.labelAr, { x:1, y:2.9, w:8, h:0.5, fontSize:20, color:"FFFFFF", align:"center", rtlMode:true });
@@ -53,20 +57,33 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage) {
     } else {
       for (let s = 0; s < section.slides; s++) {
         const slide = prs.addSlide();
-        slide.background = { color: tmpl.bg };
-        slide.addShape(prs.ShapeType.rect, { x:0, y:0, w:"100%", h:0.7, fill:{ color: tmpl.primary } });
-        if (logoDataUrl) slide.addImage({ data:logoDataUrl, x:0.2, y:0.05, w:1.0, h:0.55 });
-        else slide.addText("SOL", { x:0.2, y:0.1, w:1, h:0.5, fontSize:16, bold:true, color:"FFFFFF" });
+        if (hasTmpl) {
+          slide.background = { data: uploadedTemplate.data };
+        } else {
+          slide.background = { color: tmpl.bg };
+          slide.addShape(prs.ShapeType.rect, { x:0, y:0, w:"100%", h:0.7, fill:{ color: tmpl.primary } });
+          if (logoDataUrl) slide.addImage({ data:logoDataUrl, x:0.2, y:0.05, w:1.0, h:0.55 });
+          else slide.addText("SOL", { x:0.2, y:0.1, w:1, h:0.5, fontSize:16, bold:true, color:"FFFFFF" });
+        }
+        const textColor = hasTmpl ? "000000" : "333333";
+        const titleColor = hasTmpl ? "000000" : tmpl.primary;
+        const yStart = hasTmpl ? 1.2 : 0.9;
         const enPts = sd.points_en || [];
         const arPts = sd.points_ar || [];
-        slide.addText(sd.title_en || section.label, { x:0.4, y:0.9, w:4.5, h:0.5, fontSize:16, bold:true, color:tmpl.primary });
-        slide.addShape(prs.ShapeType.rect, { x:0.4, y:1.45, w:1.2, h:0.04, fill:{ color:tmpl.accent } });
-        enPts.forEach((p,i) => slide.addText(`• ${p}`, { x:0.4, y:1.55+i*0.45, w:4.5, h:0.4, fontSize:11, color:"333333" }));
-        slide.addText(sd.title_ar || section.labelAr, { x:5.1, y:0.9, w:4.5, h:0.5, fontSize:16, bold:true, color:tmpl.primary, align:"right", rtlMode:true });
-        arPts.forEach((p,i) => slide.addText(`${p} •`, { x:5.1, y:1.55+i*0.45, w:4.5, h:0.4, fontSize:11, color:"333333", align:"right", rtlMode:true }));
-        slide.addShape(prs.ShapeType.rect, { x:4.95, y:0.85, w:0.1, h:4.2, fill:{ color: tmpl.accent } });
-        slide.addShape(prs.ShapeType.rect, { x:0, y:5.1, w:"100%", h:0.4, fill:{ color:tmpl.primary } });
-        slide.addText("SOL for Business Solutions", { x:0.2, y:5.15, w:5, h:0.3, fontSize:8, color:"FFFFFF" });
+
+        slide.addText(sd.title_en || section.label, { x:0.4, y:yStart, w:4.5, h:0.5, fontSize:16, bold:true, color:titleColor });
+        slide.addShape(prs.ShapeType.rect, { x:0.4, y:yStart+0.55, w:1.2, h:0.04, fill:{ color: tmpl.accent } });
+        enPts.forEach((p,i) => slide.addText(`• ${p}`, { x:0.4, y:yStart+0.65+i*0.45, w:4.5, h:0.4, fontSize:11, color:textColor }));
+
+        slide.addText(sd.title_ar || section.labelAr, { x:5.1, y:yStart, w:4.5, h:0.5, fontSize:16, bold:true, color:titleColor, align:"right", rtlMode:true });
+        arPts.forEach((p,i) => slide.addText(`${p} •`, { x:5.1, y:yStart+0.65+i*0.45, w:4.5, h:0.4, fontSize:11, color:textColor, align:"right", rtlMode:true }));
+
+        slide.addShape(prs.ShapeType.rect, { x:4.95, y:yStart+0.5, w:0.05, h:3.5, fill:{ color: tmpl.accent } });
+
+        if (!hasTmpl) {
+          slide.addShape(prs.ShapeType.rect, { x:0, y:5.1, w:"100%", h:0.4, fill:{ color:tmpl.primary } });
+          slide.addText("SOL for Business Solutions", { x:0.2, y:5.15, w:5, h:0.3, fontSize:8, color:"FFFFFF" });
+        }
       }
     }
   }
@@ -109,11 +126,11 @@ export default function App() {
   const [logoDataUrl, setLogoDataUrl] = useState(null);
   const [activeTab, setActiveTab] = useState("form");
   const [editingColors, setEditingColors] = useState(false);
-  const [uploadedTemplate, setUploadedTemplate] = useState(null); // { name, type, preview }
+  const [uploadedTemplate, setUploadedTemplate] = useState(null);
   const [imgPrompt, setImgPrompt] = useState("");
   const [generatedImages, setGeneratedImages] = useState([]);
   const [imgLoading, setImgLoading] = useState(false);
-  const [selectedImage, setSelectedImage] = useState(null); // chosen image for proposal
+  const [selectedImage, setSelectedImage] = useState(null);
   const fileRef = useRef();
   const templateFileRef = useRef();
 
@@ -133,18 +150,17 @@ export default function App() {
     r.readAsDataURL(file);
   };
 
-  // ── Template upload: accepts PPTX or PDF ─────────────────────────────────
   const handleTemplateUpload = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const ext = file.name.split(".").pop().toLowerCase();
     if (!["pptx","pdf"].includes(ext)) {
-      alert("Please upload a .pptx or .pdf file"); 
+      alert("Please upload a .pptx or .pdf file");
       e.target.value = ""; return;
     }
     const r = new FileReader();
     r.onload = ev => {
       setUploadedTemplate({ name: file.name, type: ext, data: ev.target.result });
-      alert(`✅ Template "${file.name}" uploaded! It will be used as the base for your proposal.`);
+      alert(`✅ Template "${file.name}" uploaded! AI content will be filled into your template slides.`);
     };
     r.readAsDataURL(file);
     e.target.value = "";
@@ -184,25 +200,31 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
     finally { setLoading(false); }
   };
 
-  // ── Image generation ──────────────────────────────────────────────────────
   const handleGenerateImage = async () => {
     if (!imgPrompt.trim()) return;
-    setImgLoading(true);
+    setImgLoading(true); setError("");
     try {
       const encoded = encodeURIComponent(imgPrompt.trim());
       const seed = Math.floor(Math.random()*99999);
+      const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true&model=flux`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Failed");
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      setGeneratedImages(imgs=>[{ url: objectUrl, prompt:imgPrompt }, ...imgs]);
+    } catch {
+      // Fallback: set URL directly
+      const encoded = encodeURIComponent(imgPrompt.trim());
+      const seed = Math.floor(Math.random()*99999);
       const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
-      await new Promise((res,rej) => {
-        const img = new Image(); img.onload=res; img.onerror=rej; img.src=url;
-      });
       setGeneratedImages(imgs=>[{ url, prompt:imgPrompt }, ...imgs]);
-    } catch { setError("Image generation failed. Try a different prompt."); }
+    }
     finally { setImgLoading(false); }
   };
 
   const handleExport = async () => {
     setExporting(true);
-    try { await exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage); }
+    try { await exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, uploadedTemplate); }
     catch(e) { setError(e.message); }
     finally { setExporting(false); }
   };
@@ -255,7 +277,6 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
 
   return (
     <div style={{ minHeight:"100vh", background:"#f5f6fa", fontFamily:"Arial, sans-serif", direction:isAr?"rtl":"ltr" }}>
-      {/* Top Bar */}
       <div style={{ background:`#${tmpl.primary}`, padding:"12px 24px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
         <div style={{ color:"#fff", fontWeight:800, fontSize:18 }}>{isAr?"مولّد عروض SOL":"SOL Proposal Generator"}</div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
@@ -288,7 +309,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
 
       <div style={{ maxWidth:900, margin:"24px auto", padding:"0 16px" }}>
 
-        {/* ── FORM ── */}
+        {/* FORM */}
         {activeTab==="form" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", marginBottom:20, borderRadius:10, overflow:"hidden", border:`1.5px solid #${tmpl.primary}30` }}>
@@ -301,7 +322,6 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               ))}
             </div>
 
-            {/* Step 1 - Client Info */}
             {step===1 && <>
               <Field label={isAr?"اسم العميل / الشركة *":"Client / Company Name *"}>
                 <Input value={form.clientName} onChange={v=>set("clientName",v)} placeholder="e.g. Al-Rashid Group"/>
@@ -337,9 +357,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             </>}
 
-            {/* Step 2 - Template + Colors + Image Generator */}
             {step===2 && <>
-              {/* Design Templates */}
               <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎨 {isAr?"اختر تصميماً":"Choose a Design"}</div>
               <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
                 {DEFAULT_TEMPLATES.map(t=>(
@@ -378,33 +396,32 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                 )}
               </div>
 
-              {/* Upload PPTX / PDF Template */}
-              <div style={{ background:"#f0f9ff", borderRadius:10, padding:14, marginBottom:16, border:"1px dashed #06B6D4" }}>
+              {/* Upload PPTX/PDF */}
+              <div style={{ background:"#f0f9ff", borderRadius:10, padding:14, marginBottom:14, border:"1px dashed #06B6D4" }}>
                 <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>📁 {isAr?"رفع قالب (PPTX أو PDF)":"Upload Your Template (PPTX or PDF)"}</div>
                 <div style={{ fontSize:11, color:"#555", marginBottom:10 }}>
-                  {isAr?"ارفع قالب العرض الخاص بك ليُستخدم كأساس للتصميم":"Upload your own PPTX or PDF template to use as the base design"}
+                  {isAr?"ارفع قالبك الخاص ليُملأ بالمحتوى المُنشأ بالذكاء الاصطناعي":"Upload your own PPTX or PDF — AI content will be filled into your template"}
                 </div>
                 <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                   <button onClick={()=>templateFileRef.current.click()} style={{...btn(),fontSize:12}}>
-                    📂 {isAr?"اختر ملف PPTX أو PDF":"Choose PPTX or PDF File"}
+                    📂 {isAr?"اختر ملف":"Choose File"}
                   </button>
                   {uploadedTemplate && (
                     <div style={{ display:"flex", alignItems:"center", gap:8, background:"#e0f2fe", padding:"6px 12px", borderRadius:8 }}>
                       <span style={{ fontSize:16 }}>{uploadedTemplate.type==="pdf"?"📄":"📊"}</span>
                       <span style={{ fontSize:12, color:"#0369a1", fontWeight:600 }}>{uploadedTemplate.name}</span>
-                      <button onClick={()=>setUploadedTemplate(null)}
-                        style={{ background:"none", border:"none", color:"#c00", cursor:"pointer", fontSize:14 }}>✕</button>
+                      <button onClick={()=>setUploadedTemplate(null)} style={{ background:"none", border:"none", color:"#c00", cursor:"pointer", fontSize:14 }}>✕</button>
                     </div>
                   )}
                 </div>
                 <input ref={templateFileRef} type="file" accept=".pptx,.pdf" style={{ display:"none" }} onChange={handleTemplateUpload}/>
               </div>
 
-              {/* AI Image Generator — in template step */}
-              <div style={{ background:"#fdf4ff", borderRadius:10, padding:14, marginBottom:16, border:"1px solid #e9d5ff" }}>
-                <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>🖼 {isAr?"إنشاء صور بالذكاء الاصطناعي":"Generate AI Images for Your Proposal"}</div>
+              {/* AI Image Generator */}
+              <div style={{ background:"#fdf4ff", borderRadius:10, padding:14, marginBottom:14, border:"1px solid #e9d5ff" }}>
+                <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>🖼 {isAr?"إنشاء صور بالذكاء الاصطناعي":"Generate AI Images"}</div>
                 <div style={{ fontSize:11, color:"#666", marginBottom:10 }}>
-                  {isAr?"أنشئ صوراً واختر منها لإضافتها إلى العرض":"Generate images and pick one to include in your proposal"}
+                  {isAr?"أنشئ صوراً واختر منها لإضافتها لشرائح الفواصل":"Generate images and pick one to add to your divider slides"}
                 </div>
                 <div style={{ display:"flex", gap:8, marginBottom:12 }}>
                   <input value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)}
@@ -417,32 +434,32 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                   </button>
                 </div>
                 {imgLoading && (
-                  <div style={{ textAlign:"center", padding:"16px 0", color:"#888", fontSize:12 }}>
+                  <div style={{ textAlign:"center", padding:"14px 0", color:"#888", fontSize:12 }}>
                     ⏳ {isAr?"جاري إنشاء الصورة (10-20 ثانية)...":"Generating image (10-20 seconds)..."}
                   </div>
                 )}
                 {generatedImages.length > 0 && (
                   <>
                     <div style={{ fontSize:12, fontWeight:600, color:"#555", marginBottom:8 }}>
-                      {isAr?"اختر صورة لاستخدامها في العرض:":"Select an image to use in your proposal:"}
+                      {isAr?"اختر صورة:":"Select an image to use:"}
                     </div>
                     <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
                       {generatedImages.map((img,i)=>(
                         <div key={i} onClick={()=>setSelectedImage(selectedImage===img.url?null:img.url)}
                           style={{ cursor:"pointer", borderRadius:8, overflow:"hidden", position:"relative",
-                            border: selectedImage===img.url ? `3px solid #${tmpl.primary}` : "3px solid transparent",
-                            boxShadow: selectedImage===img.url ? `0 0 0 2px #${tmpl.primary}44` : "none" }}>
-                          <img src={img.url} alt={img.prompt} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}/>
+                            border: selectedImage===img.url?`3px solid #${tmpl.primary}`:"3px solid transparent" }}>
+                          <img src={img.url} alt={img.prompt} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}
+                            onError={e=>{ e.target.style.display="none"; }}/>
                           {selectedImage===img.url && (
-                            <div style={{ position:"absolute", top:4, right:4, background:`#${tmpl.primary}`, borderRadius:"50%", width:20, height:20,
-                              display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#fff" }}>✓</div>
+                            <div style={{ position:"absolute", top:4, right:4, background:`#${tmpl.primary}`, borderRadius:"50%",
+                              width:20, height:20, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#fff" }}>✓</div>
                           )}
                         </div>
                       ))}
                     </div>
                     {selectedImage && (
                       <div style={{ marginTop:8, fontSize:11, color:`#${tmpl.primary}`, fontWeight:600 }}>
-                        ✅ {isAr?"تم اختيار الصورة — ستُضاف إلى شرائح الفواصل":"Image selected — will be added to divider slides"}
+                        ✅ {isAr?"تم اختيار الصورة":"Image selected — will appear on divider slides"}
                       </div>
                     )}
                   </>
@@ -455,7 +472,6 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             </>}
 
-            {/* Step 3 - Content */}
             {step===3 && <>
               <Field label={isAr?"الخدمات المقدمة *":"Services Offered *"}>
                 <Textarea value={form.services} onChange={v=>set("services",v)} placeholder="e.g. ERP implementation, IT consulting"/>
@@ -487,7 +503,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
           </div>
         )}
 
-        {/* ── SECTIONS ── */}
+        {/* SECTIONS */}
         {activeTab==="sections" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
@@ -519,12 +535,12 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             ))}
             <div style={{ marginTop:14, padding:"10px 14px", background:"#fffbeb", borderRadius:8, fontSize:11, color:"#92400e", border:"1px solid #fde68a" }}>
-              💡 {isAr?"الأقسام المميزة كـ'فاصل' ستظهر كشرائح فاصلة في العرض":"Sections marked as Divider appear as separator slides in the PPTX"}
+              💡 {isAr?"الأقسام المميزة كـ'فاصل' ستظهر كشرائح فاصلة":"Sections marked as Divider appear as separator slides in the PPTX"}
             </div>
           </div>
         )}
 
-        {/* ── PREVIEW ── */}
+        {/* PREVIEW */}
         {activeTab==="preview" && data && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
