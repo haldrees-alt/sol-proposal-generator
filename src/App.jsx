@@ -28,7 +28,6 @@ const initForm = {
   paymentTerms:"", timeline:"", notes:"",
 };
 
-// ── API ───────────────────────────────────────────────────────────────────
 async function callAPI(systemPrompt, userPrompt) {
   const res = await fetch("/.netlify/functions/generate", {
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -38,17 +37,15 @@ async function callAPI(systemPrompt, userPrompt) {
   return res.json();
 }
 
-// ── PPTX Export ───────────────────────────────────────────────────────────
-async function exportPPTX(data, tmpl, logoDataUrl, sections) {
+async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage) {
   const prs = new pptxgen();
   prs.layout = "LAYOUT_WIDE";
-
   for (const section of sections) {
     const sd = data[section.id] || {};
-
     if (section.isDivider) {
       const slide = prs.addSlide();
       slide.background = { color: tmpl.primary };
+      if (selectedImage) slide.addImage({ path: selectedImage, x:0, y:0, w:"100%", h:"100%", transparency:70 });
       slide.addShape(prs.ShapeType.rect, { x:0, y:2, w:"100%", h:1.5, fill:{ color: tmpl.accent } });
       slide.addText(section.label, { x:1, y:2.1, w:8, h:0.7, fontSize:32, bold:true, color:"FFFFFF", align:"center" });
       slide.addText(section.labelAr, { x:1, y:2.9, w:8, h:0.5, fontSize:20, color:"FFFFFF", align:"center", rtlMode:true });
@@ -60,17 +57,13 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections) {
         slide.addShape(prs.ShapeType.rect, { x:0, y:0, w:"100%", h:0.7, fill:{ color: tmpl.primary } });
         if (logoDataUrl) slide.addImage({ data:logoDataUrl, x:0.2, y:0.05, w:1.0, h:0.55 });
         else slide.addText("SOL", { x:0.2, y:0.1, w:1, h:0.5, fontSize:16, bold:true, color:"FFFFFF" });
-
         const enPts = sd.points_en || [];
         const arPts = sd.points_ar || [];
-
         slide.addText(sd.title_en || section.label, { x:0.4, y:0.9, w:4.5, h:0.5, fontSize:16, bold:true, color:tmpl.primary });
         slide.addShape(prs.ShapeType.rect, { x:0.4, y:1.45, w:1.2, h:0.04, fill:{ color:tmpl.accent } });
         enPts.forEach((p,i) => slide.addText(`• ${p}`, { x:0.4, y:1.55+i*0.45, w:4.5, h:0.4, fontSize:11, color:"333333" }));
-
         slide.addText(sd.title_ar || section.labelAr, { x:5.1, y:0.9, w:4.5, h:0.5, fontSize:16, bold:true, color:tmpl.primary, align:"right", rtlMode:true });
         arPts.forEach((p,i) => slide.addText(`${p} •`, { x:5.1, y:1.55+i*0.45, w:4.5, h:0.4, fontSize:11, color:"333333", align:"right", rtlMode:true }));
-
         slide.addShape(prs.ShapeType.rect, { x:4.95, y:0.85, w:0.1, h:4.2, fill:{ color: tmpl.accent } });
         slide.addShape(prs.ShapeType.rect, { x:0, y:5.1, w:"100%", h:0.4, fill:{ color:tmpl.primary } });
         slide.addText("SOL for Business Solutions", { x:0.2, y:5.15, w:5, h:0.3, fontSize:8, color:"FFFFFF" });
@@ -80,7 +73,6 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections) {
   prs.writeFile({ fileName:`SOL_Proposal_${Date.now()}.pptx` });
 }
 
-// ── UI Helpers ────────────────────────────────────────────────────────────
 const Field = ({ label, children }) => (
   <div style={{ marginBottom:14 }}>
     <label style={{ display:"block", fontSize:12, fontWeight:600, color:"#444", marginBottom:4 }}>{label}</label>
@@ -102,7 +94,6 @@ const Select = ({ value, onChange, options }) => (
   </select>
 );
 
-// ── App ───────────────────────────────────────────────────────────────────
 export default function App() {
   const [form, setForm] = useState(initForm);
   const [step, setStep] = useState(1);
@@ -117,10 +108,12 @@ export default function App() {
   const [logoPreview, setLogoPreview] = useState(null);
   const [logoDataUrl, setLogoDataUrl] = useState(null);
   const [activeTab, setActiveTab] = useState("form");
+  const [editingColors, setEditingColors] = useState(false);
+  const [uploadedTemplate, setUploadedTemplate] = useState(null); // { name, type, preview }
   const [imgPrompt, setImgPrompt] = useState("");
   const [generatedImages, setGeneratedImages] = useState([]);
   const [imgLoading, setImgLoading] = useState(false);
-  const [editingColors, setEditingColors] = useState(false);
+  const [selectedImage, setSelectedImage] = useState(null); // chosen image for proposal
   const fileRef = useRef();
   const templateFileRef = useRef();
 
@@ -129,7 +122,7 @@ export default function App() {
   const baseTmpl = DEFAULT_TEMPLATES.find(t=>t.id===tmplId) || DEFAULT_TEMPLATES[0];
   const tmpl = { ...baseTmpl, ...(customColors[tmplId]||{}) };
   const btn = (primary=true) => ({
-    padding:"9px 22px", borderRadius:8, border:"none", cursor:"pointer", fontWeight:700, fontSize:13,
+    padding:"9px 20px", borderRadius:8, border:"none", cursor:"pointer", fontWeight:700, fontSize:13,
     background: primary ? `#${tmpl.primary}` : "#f0f0f0", color: primary ? "#fff" : "#333"
   });
 
@@ -140,31 +133,20 @@ export default function App() {
     r.readAsDataURL(file);
   };
 
-  // Template upload — accepts JSON with sections and/or colors
+  // ── Template upload: accepts PPTX or PDF ─────────────────────────────────
   const handleTemplateUpload = (e) => {
     const file = e.target.files[0]; if (!file) return;
-    if (!file.name.endsWith(".json")) { alert("Please upload a .json file"); return; }
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (!["pptx","pdf"].includes(ext)) {
+      alert("Please upload a .pptx or .pdf file"); 
+      e.target.value = ""; return;
+    }
     const r = new FileReader();
     r.onload = ev => {
-      try {
-        const parsed = JSON.parse(ev.target.result);
-        let msg = "Template loaded!\n";
-        if (parsed.sections && Array.isArray(parsed.sections)) {
-          setSections(parsed.sections);
-          msg += `✅ ${parsed.sections.length} sections loaded\n`;
-        }
-        if (parsed.colors && typeof parsed.colors === "object") {
-          setCustomColors(c=>({...c,[tmplId]:parsed.colors}));
-          msg += "✅ Custom colors applied\n";
-        }
-        if (!parsed.sections && !parsed.colors) msg = "⚠️ No sections or colors found in file.";
-        alert(msg);
-      } catch(err) {
-        alert("❌ Could not read file. Make sure it's valid JSON.\n\nError: " + err.message);
-      }
+      setUploadedTemplate({ name: file.name, type: ext, data: ev.target.result });
+      alert(`✅ Template "${file.name}" uploaded! It will be used as the base for your proposal.`);
     };
-    r.readAsText(file);
-    // Reset input so same file can be uploaded again
+    r.readAsDataURL(file);
     e.target.value = "";
   };
 
@@ -173,25 +155,19 @@ export default function App() {
   const updateSection = (id,k,v) => setSections(s=>s.map(x=>x.id===id?{...x,[k]:v}:x));
   const moveSection = (idx,dir) => setSections(s=>{ const a=[...s],sw=idx+dir; if(sw<0||sw>=a.length) return a; [a[idx],a[sw]]=[a[sw],a[idx]]; return a; });
 
-  // Generate — simplified prompt to avoid JSON errors
   const generate = async () => {
     if (!form.clientName||!form.industry||!form.budget||!form.services) {
       setError("Please fill all required fields (*)"); return;
     }
     setLoading(true); setError("");
     try {
-      // Only generate for non-divider sections
       const contentSections = sections.filter(s=>!s.isDivider);
       const sectionIds = contentSections.map(s=>s.id).join(", ");
-
       const sys = `You are a bilingual proposal writer for SOL for Business Solutions, Saudi Arabia.
-Return ONLY a valid JSON object. No markdown, no backticks, no extra text before or after.
+Return ONLY a valid JSON object. No markdown, no backticks, no extra text.
 Keep bullet points short (max 10 words each). Max 4 bullet points per section.`;
-
       const usr = `Write a bilingual business proposal (English + Arabic) for:
-Client: ${form.clientName}
-Industry: ${form.industry}
-Budget: ${form.currency} ${form.budget}
+Client: ${form.clientName} | Industry: ${form.industry} | Budget: ${form.currency} ${form.budget}
 Services: ${form.services}
 Challenges: ${form.challenges||"typical for this industry"}
 Solution: ${form.solution||"best fit solution"}
@@ -199,21 +175,16 @@ Team: ${form.teamMembers||"PM, BA, Consultant"}
 Timeline: ${form.timeline||"6 months"}
 Payment: ${form.paymentTerms||"50% upfront, 50% on delivery"}
 
-Return a JSON object with these keys: ${sectionIds}, companyName.
-Each section key has: title_en (string), title_ar (string), points_en (array of max 4 short strings), points_ar (array of max 4 short Arabic strings).
-companyName is just "${form.clientName}".
-IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
-
+Return JSON with keys: ${sectionIds}, companyName.
+Each section: title_en, title_ar, points_en (max 4 short strings), points_ar (max 4 short Arabic strings).
+companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special characters.`;
       const result = await callAPI(sys, usr);
-      setData(result);
-      setActiveSlide(0);
-      setActiveTab("preview");
-    } catch(e) {
-      setError("Generation failed: " + e.message);
-    } finally { setLoading(false); }
+      setData(result); setActiveSlide(0); setActiveTab("preview");
+    } catch(e) { setError("Generation failed: " + e.message); }
+    finally { setLoading(false); }
   };
 
-  // Image generation — direct browser call to Pollinations (no API key needed)
+  // ── Image generation ──────────────────────────────────────────────────────
   const handleGenerateImage = async () => {
     if (!imgPrompt.trim()) return;
     setImgLoading(true);
@@ -221,22 +192,17 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
       const encoded = encodeURIComponent(imgPrompt.trim());
       const seed = Math.floor(Math.random()*99999);
       const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
-      // Pre-load image to confirm it works
       await new Promise((res,rej) => {
-        const img = new Image();
-        img.onload = res;
-        img.onerror = rej;
-        img.src = url;
+        const img = new Image(); img.onload=res; img.onerror=rej; img.src=url;
       });
       setGeneratedImages(imgs=>[{ url, prompt:imgPrompt }, ...imgs]);
-    } catch {
-      setError("Image generation failed. Please try again with a different prompt.");
-    } finally { setImgLoading(false); }
+    } catch { setError("Image generation failed. Try a different prompt."); }
+    finally { setImgLoading(false); }
   };
 
   const handleExport = async () => {
     setExporting(true);
-    try { await exportPPTX(data, tmpl, logoDataUrl, sections); }
+    try { await exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage); }
     catch(e) { setError(e.message); }
     finally { setExporting(false); }
   };
@@ -252,8 +218,9 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
     return (
       <div style={{ background:`#${tmpl.bg}`, border:`2px solid #${tmpl.primary}20`, borderRadius:10, overflow:"hidden", minHeight:280 }}>
         {slide.type==="divider" ? (
-          <div style={{ background:`#${tmpl.primary}`, minHeight:280, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10 }}>
-            <div style={{ background:`#${tmpl.accent}`, padding:"12px 32px", borderRadius:6, textAlign:"center" }}>
+          <div style={{ background:`#${tmpl.primary}`, minHeight:280, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10, position:"relative", overflow:"hidden" }}>
+            {selectedImage && <img src={selectedImage} style={{ position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover", opacity:0.2 }}/>}
+            <div style={{ background:`#${tmpl.accent}`, padding:"12px 32px", borderRadius:6, textAlign:"center", position:"relative" }}>
               <div style={{ fontSize:22, fontWeight:800, color:"#fff" }}>{slide.label}</div>
               <div style={{ fontSize:14, color:"#ffffff99", marginTop:4 }}>{slide.labelAr}</div>
             </div>
@@ -290,11 +257,8 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
     <div style={{ minHeight:"100vh", background:"#f5f6fa", fontFamily:"Arial, sans-serif", direction:isAr?"rtl":"ltr" }}>
       {/* Top Bar */}
       <div style={{ background:`#${tmpl.primary}`, padding:"12px 24px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
-        <div style={{ color:"#fff", fontWeight:800, fontSize:18 }}>
-          {isAr?"مولّد عروض SOL":"SOL Proposal Generator"}
-        </div>
+        <div style={{ color:"#fff", fontWeight:800, fontSize:18 }}>{isAr?"مولّد عروض SOL":"SOL Proposal Generator"}</div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
-          {/* Language */}
           {["english","arabic"].map(l=>(
             <button key={l} onClick={()=>set("lang",l)}
               style={{ padding:"4px 12px", borderRadius:20, border:"none", cursor:"pointer",
@@ -303,35 +267,32 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
               {l==="english"?"EN":"ع"}
             </button>
           ))}
-          {/* Tabs */}
-          {[["form","📝 Form","📝 نموذج"],["sections","📋 Sections","📋 أقسام"],["images","🎨 Images","🎨 صور"]].map(([tab,en,ar])=>(
+          {[["form","📝 Form","📝 نموذج"],["sections","📋 Sections","📋 أقسام"]].map(([tab,en,ar])=>(
             <button key={tab} onClick={()=>setActiveTab(tab)}
               style={{ padding:"5px 14px", borderRadius:20, border:"none", cursor:"pointer",
-                background:activeTab===tab?"rgba(255,255,255,0.3)":"transparent",
-                color:"#fff", fontWeight:activeTab===tab?800:600, fontSize:12,
-                borderBottom:activeTab===tab?"2px solid #fff":"none" }}>
+                background:activeTab===tab?"rgba(255,255,255,0.25)":"transparent",
+                color:"#fff", fontWeight:activeTab===tab?800:600, fontSize:12 }}>
               {isAr?ar:en}
             </button>
           ))}
           {data && (
             <button onClick={()=>setActiveTab("preview")}
               style={{ padding:"5px 14px", borderRadius:20, border:"none", cursor:"pointer",
-                background:activeTab==="preview"?"rgba(255,255,255,0.3)":"transparent",
-                color:"#fff", fontWeight:activeTab==="preview"?800:600, fontSize:12,
-                borderBottom:activeTab==="preview"?"2px solid #fff":"none" }}>
+                background:activeTab==="preview"?"rgba(255,255,255,0.25)":"transparent",
+                color:"#fff", fontWeight:activeTab==="preview"?800:600, fontSize:12 }}>
               {isAr?"👁 معاينة":"👁 Preview"}
             </button>
           )}
         </div>
       </div>
 
-      <div style={{ maxWidth:860, margin:"24px auto", padding:"0 16px" }}>
+      <div style={{ maxWidth:900, margin:"24px auto", padding:"0 16px" }}>
 
         {/* ── FORM ── */}
         {activeTab==="form" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", marginBottom:20, borderRadius:10, overflow:"hidden", border:`1.5px solid #${tmpl.primary}30` }}>
-              {[isAr?"بيانات العميل":"Client Info", isAr?"القالب":"Template", isAr?"المحتوى":"Content"].map((s,idx)=>(
+              {[isAr?"بيانات العميل":"Client Info", isAr?"القالب والصور":"Template & Images", isAr?"المحتوى":"Content"].map((s,idx)=>(
                 <div key={idx} onClick={()=>setStep(idx+1)}
                   style={{ flex:1, padding:"9px 0", textAlign:"center", fontSize:12, fontWeight:700, cursor:"pointer",
                     background:step===idx+1?`#${tmpl.primary}`:"#fff", color:step===idx+1?"#fff":"#888" }}>
@@ -340,6 +301,7 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
               ))}
             </div>
 
+            {/* Step 1 - Client Info */}
             {step===1 && <>
               <Field label={isAr?"اسم العميل / الشركة *":"Client / Company Name *"}>
                 <Input value={form.clientName} onChange={v=>set("clientName",v)} placeholder="e.g. Al-Rashid Group"/>
@@ -375,13 +337,16 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
               </div>
             </>}
 
+            {/* Step 2 - Template + Colors + Image Generator */}
             {step===2 && <>
+              {/* Design Templates */}
+              <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎨 {isAr?"اختر تصميماً":"Choose a Design"}</div>
               <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
                 {DEFAULT_TEMPLATES.map(t=>(
                   <div key={t.id} onClick={()=>setTmplId(t.id)}
                     style={{ border:`2.5px solid ${tmplId===t.id?`#${t.primary}`:"#e0e0e0"}`, borderRadius:10, padding:12, cursor:"pointer", textAlign:"center",
                       background:tmplId===t.id?`#${t.bg}`:"#fff" }}>
-                    <div style={{ fontSize:24, marginBottom:4 }}>{t.icon}</div>
+                    <div style={{ fontSize:22, marginBottom:4 }}>{t.icon}</div>
                     <div style={{ fontWeight:700, fontSize:12, color:`#${t.primary}` }}>{isAr?t.nameAr:t.name}</div>
                     <div style={{ display:"flex", gap:3, justifyContent:"center", marginTop:5 }}>
                       {[t.primary,t.secondary,t.accent].map((c,i)=><div key={i} style={{ width:12,height:12,borderRadius:"50%",background:`#${c}` }}/>)}
@@ -393,7 +358,7 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
               {/* Color Editor */}
               <div style={{ background:"#f8f9fa", borderRadius:10, padding:14, marginBottom:14 }}>
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
-                  <div style={{ fontWeight:700, fontSize:13 }}>🎨 {isAr?"تخصيص الألوان":"Customize Colors"}</div>
+                  <div style={{ fontWeight:700, fontSize:13 }}>🖌 {isAr?"تخصيص الألوان":"Customize Colors"}</div>
                   <button onClick={()=>setEditingColors(!editingColors)}
                     style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #ddd", background:"#fff", fontSize:11, cursor:"pointer" }}>
                     {editingColors?(isAr?"تم":"Done"):(isAr?"تعديل":"Edit Colors")}
@@ -404,4 +369,191 @@ IMPORTANT: Keep all strings short. No special characters. Valid JSON only.`;
                     {[["primary","Primary"],["secondary","Secondary"],["accent","Accent"],["bg","Background"]].map(([key,label])=>(
                       <div key={key} style={{ textAlign:"center" }}>
                         <div style={{ fontSize:10, color:"#666", marginBottom:4 }}>{label}</div>
-                        <input ty
+                        <input type="color" value={`#${customColors[tmplId]?.[key]||baseTmpl[key]}`}
+                          onChange={e=>setCustomColors(c=>({...c,[tmplId]:{...(c[tmplId]||{}),[key]:e.target.value.replace("#","")}}))}
+                          style={{ width:40, height:32, border:"none", borderRadius:6, cursor:"pointer" }}/>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Upload PPTX / PDF Template */}
+              <div style={{ background:"#f0f9ff", borderRadius:10, padding:14, marginBottom:16, border:"1px dashed #06B6D4" }}>
+                <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>📁 {isAr?"رفع قالب (PPTX أو PDF)":"Upload Your Template (PPTX or PDF)"}</div>
+                <div style={{ fontSize:11, color:"#555", marginBottom:10 }}>
+                  {isAr?"ارفع قالب العرض الخاص بك ليُستخدم كأساس للتصميم":"Upload your own PPTX or PDF template to use as the base design"}
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <button onClick={()=>templateFileRef.current.click()} style={{...btn(),fontSize:12}}>
+                    📂 {isAr?"اختر ملف PPTX أو PDF":"Choose PPTX or PDF File"}
+                  </button>
+                  {uploadedTemplate && (
+                    <div style={{ display:"flex", alignItems:"center", gap:8, background:"#e0f2fe", padding:"6px 12px", borderRadius:8 }}>
+                      <span style={{ fontSize:16 }}>{uploadedTemplate.type==="pdf"?"📄":"📊"}</span>
+                      <span style={{ fontSize:12, color:"#0369a1", fontWeight:600 }}>{uploadedTemplate.name}</span>
+                      <button onClick={()=>setUploadedTemplate(null)}
+                        style={{ background:"none", border:"none", color:"#c00", cursor:"pointer", fontSize:14 }}>✕</button>
+                    </div>
+                  )}
+                </div>
+                <input ref={templateFileRef} type="file" accept=".pptx,.pdf" style={{ display:"none" }} onChange={handleTemplateUpload}/>
+              </div>
+
+              {/* AI Image Generator — in template step */}
+              <div style={{ background:"#fdf4ff", borderRadius:10, padding:14, marginBottom:16, border:"1px solid #e9d5ff" }}>
+                <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>🖼 {isAr?"إنشاء صور بالذكاء الاصطناعي":"Generate AI Images for Your Proposal"}</div>
+                <div style={{ fontSize:11, color:"#666", marginBottom:10 }}>
+                  {isAr?"أنشئ صوراً واختر منها لإضافتها إلى العرض":"Generate images and pick one to include in your proposal"}
+                </div>
+                <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+                  <input value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)}
+                    onKeyDown={e=>e.key==="Enter"&&handleGenerateImage()}
+                    placeholder={isAr?"مثال: مكتب حديث في الرياض":"e.g. Modern office in Riyadh, Saudi Arabia"}
+                    style={{ flex:1, padding:"8px 12px", border:"1.5px solid #ddd", borderRadius:8, fontSize:12, outline:"none" }}/>
+                  <button onClick={handleGenerateImage} disabled={imgLoading||!imgPrompt.trim()}
+                    style={{...btn(), fontSize:12, opacity:(imgLoading||!imgPrompt.trim())?.7:1}}>
+                    {imgLoading?"⏳":(isAr?"✨ إنشاء":"✨ Generate")}
+                  </button>
+                </div>
+                {imgLoading && (
+                  <div style={{ textAlign:"center", padding:"16px 0", color:"#888", fontSize:12 }}>
+                    ⏳ {isAr?"جاري إنشاء الصورة (10-20 ثانية)...":"Generating image (10-20 seconds)..."}
+                  </div>
+                )}
+                {generatedImages.length > 0 && (
+                  <>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#555", marginBottom:8 }}>
+                      {isAr?"اختر صورة لاستخدامها في العرض:":"Select an image to use in your proposal:"}
+                    </div>
+                    <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
+                      {generatedImages.map((img,i)=>(
+                        <div key={i} onClick={()=>setSelectedImage(selectedImage===img.url?null:img.url)}
+                          style={{ cursor:"pointer", borderRadius:8, overflow:"hidden", position:"relative",
+                            border: selectedImage===img.url ? `3px solid #${tmpl.primary}` : "3px solid transparent",
+                            boxShadow: selectedImage===img.url ? `0 0 0 2px #${tmpl.primary}44` : "none" }}>
+                          <img src={img.url} alt={img.prompt} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}/>
+                          {selectedImage===img.url && (
+                            <div style={{ position:"absolute", top:4, right:4, background:`#${tmpl.primary}`, borderRadius:"50%", width:20, height:20,
+                              display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#fff" }}>✓</div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    {selectedImage && (
+                      <div style={{ marginTop:8, fontSize:11, color:`#${tmpl.primary}`, fontWeight:600 }}>
+                        ✅ {isAr?"تم اختيار الصورة — ستُضاف إلى شرائح الفواصل":"Image selected — will be added to divider slides"}
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              <div style={{ display:"flex", justifyContent:"space-between" }}>
+                <button onClick={()=>setStep(1)} style={btn(false)}>{isAr?"→ رجوع":"← Back"}</button>
+                <button onClick={()=>setStep(3)} style={btn()}>{isAr?"التالي →":"Next →"}</button>
+              </div>
+            </>}
+
+            {/* Step 3 - Content */}
+            {step===3 && <>
+              <Field label={isAr?"الخدمات المقدمة *":"Services Offered *"}>
+                <Textarea value={form.services} onChange={v=>set("services",v)} placeholder="e.g. ERP implementation, IT consulting"/>
+              </Field>
+              <Field label={isAr?"تحديات العميل":"Client Challenges"}>
+                <Textarea value={form.challenges} onChange={v=>set("challenges",v)} placeholder="e.g. Outdated systems..."/>
+              </Field>
+              <Field label={isAr?"الحل المقترح":"Proposed Solution"}>
+                <Textarea value={form.solution} onChange={v=>set("solution",v)} placeholder="e.g. SAP implementation..."/>
+              </Field>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                <Field label={isAr?"أعضاء الفريق":"Team Members"}><Input value={form.teamMembers} onChange={v=>set("teamMembers",v)} placeholder="PM, BA, Developer"/></Field>
+                <Field label={isAr?"الجدول الزمني":"Timeline"}><Input value={form.timeline} onChange={v=>set("timeline",v)} placeholder="6 months"/></Field>
+              </div>
+              <Field label={isAr?"شروط الدفع":"Payment Terms"}>
+                <Input value={form.paymentTerms} onChange={v=>set("paymentTerms",v)} placeholder="50% upfront, 50% delivery"/>
+              </Field>
+              <Field label={isAr?"ملاحظات إضافية":"Additional Notes"}>
+                <Textarea value={form.notes} onChange={v=>set("notes",v)} rows={2} placeholder="Any extra context..."/>
+              </Field>
+              {error && <div style={{ background:"#fff0f0", border:"1px solid #fcc", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#c00", marginBottom:12 }}>{error}</div>}
+              <div style={{ display:"flex", justifyContent:"space-between" }}>
+                <button onClick={()=>setStep(2)} style={btn(false)}>{isAr?"→ رجوع":"← Back"}</button>
+                <button onClick={generate} disabled={loading} style={{...btn(),opacity:loading?.7:1}}>
+                  {loading?(isAr?"جاري الإنشاء...":"⏳ Generating..."):(isAr?"✨ إنشاء العرض":"✨ Generate Proposal")}
+                </button>
+              </div>
+            </>}
+          </div>
+        )}
+
+        {/* ── SECTIONS ── */}
+        {activeTab==="sections" && (
+          <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
+              <div style={{ fontWeight:800, fontSize:16 }}>📋 {isAr?"أقسام العرض":"Proposal Sections"}</div>
+              <button onClick={addSection} style={btn()}>+ {isAr?"إضافة قسم":"Add Section"}</button>
+            </div>
+            {sections.map((s,idx)=>(
+              <div key={s.id} style={{ border:"1.5px solid #e0e0e0", borderRadius:10, padding:12, marginBottom:8, background:s.isDivider?`#${tmpl.primary}08`:"#fff" }}>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr auto auto auto auto", gap:8, alignItems:"center" }}>
+                  <input value={s.label} onChange={e=>updateSection(s.id,"label",e.target.value)}
+                    style={{ padding:"6px 10px", border:"1px solid #ddd", borderRadius:6, fontSize:12 }} placeholder="English label"/>
+                  <input value={s.labelAr} onChange={e=>updateSection(s.id,"labelAr",e.target.value)}
+                    style={{ padding:"6px 10px", border:"1px solid #ddd", borderRadius:6, fontSize:12, direction:"rtl" }} placeholder="التسمية"/>
+                  <div style={{ textAlign:"center" }}>
+                    <div style={{ fontSize:9, color:"#888" }}>{isAr?"شرائح":"Slides"}</div>
+                    <input type="number" min="1" max="10" value={s.slides} onChange={e=>updateSection(s.id,"slides",parseInt(e.target.value)||1)}
+                      style={{ width:46, padding:"4px", border:"1px solid #ddd", borderRadius:6, fontSize:12, textAlign:"center" }}/>
+                  </div>
+                  <div style={{ textAlign:"center" }}>
+                    <div style={{ fontSize:9, color:"#888" }}>{isAr?"فاصل":"Divider"}</div>
+                    <input type="checkbox" checked={s.isDivider} onChange={e=>updateSection(s.id,"isDivider",e.target.checked)} style={{ width:16, height:16, cursor:"pointer" }}/>
+                  </div>
+                  <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+                    <button onClick={()=>moveSection(idx,-1)} disabled={idx===0} style={{ padding:"2px 6px", border:"1px solid #ddd", borderRadius:4, fontSize:10, cursor:"pointer", opacity:idx===0?.4:1 }}>↑</button>
+                    <button onClick={()=>moveSection(idx,1)} disabled={idx===sections.length-1} style={{ padding:"2px 6px", border:"1px solid #ddd", borderRadius:4, fontSize:10, cursor:"pointer", opacity:idx===sections.length-1?.4:1 }}>↓</button>
+                  </div>
+                  <button onClick={()=>removeSection(s.id)} style={{ padding:"4px 8px", border:"none", borderRadius:6, background:"#fff0f0", color:"#c00", fontSize:12, cursor:"pointer" }}>✕</button>
+                </div>
+              </div>
+            ))}
+            <div style={{ marginTop:14, padding:"10px 14px", background:"#fffbeb", borderRadius:8, fontSize:11, color:"#92400e", border:"1px solid #fde68a" }}>
+              💡 {isAr?"الأقسام المميزة كـ'فاصل' ستظهر كشرائح فاصلة في العرض":"Sections marked as Divider appear as separator slides in the PPTX"}
+            </div>
+          </div>
+        )}
+
+        {/* ── PREVIEW ── */}
+        {activeTab==="preview" && data && (
+          <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
+              <div style={{ fontWeight:800, fontSize:16, color:`#${tmpl.primary}` }}>{isAr?"معاينة العرض":"Proposal Preview"}</div>
+              <div style={{ display:"flex", gap:8 }}>
+                <button onClick={()=>{setData(null);setActiveTab("form");setStep(1);}} style={btn(false)}>✏️ {isAr?"تعديل":"Edit"}</button>
+                <button onClick={handleExport} disabled={exporting} style={{...btn(),opacity:exporting?.7:1}}>
+                  {exporting?"⏳":`⬇️ ${isAr?"تحميل PPTX":"Download PPTX"}`}
+                </button>
+              </div>
+            </div>
+            <div style={{ display:"flex", gap:4, flexWrap:"wrap", marginBottom:12 }}>
+              {flatSlides.map((s,idx)=>(
+                <button key={idx} onClick={()=>setActiveSlide(idx)}
+                  style={{ padding:"3px 8px", borderRadius:20, border:"none", cursor:"pointer", fontSize:10, fontWeight:600,
+                    background:activeSlide===idx?`#${tmpl.primary}`:s.type==="divider"?`#${tmpl.accent}22`:"#f0f0f0",
+                    color:activeSlide===idx?"#fff":s.type==="divider"?`#${tmpl.accent}`:"#555" }}>
+                  {s.type==="divider"?"§ ":""}{s.label.split(" ").slice(0,2).join(" ")}
+                </button>
+              ))}
+            </div>
+            <SlidePreview/>
+            <div style={{ marginTop:10, padding:"8px 12px", background:"#fffbeb", borderRadius:8, fontSize:10, color:"#92400e", border:"1px solid #fde68a" }}>
+              💡 {isAr?"ملف PPTX يفتح في PowerPoint أو Google Slides":"PPTX opens in PowerPoint. For Google Slides: File → Import Slides"}
+            </div>
+            {error && <div style={{ marginTop:8, background:"#fff0f0", border:"1px solid #fcc", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#c00" }}>{error}</div>}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
