@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef } from "react";
 import pptxgen from "pptxgenjs";
 
 const DEFAULT_SECTIONS = [
@@ -20,7 +20,7 @@ const DEFAULT_TEMPLATES = [
 ];
 
 const CURRENCIES = ["SAR","USD","AED","KWD","QAR","BHD","OMR","EGP"];
-const SLIDE_W = 10, SLIDE_H = 5.625; // pptx inches (16:9)
+const PPTX_W = 10, PPTX_H = 5.625;
 
 const initForm = {
   clientName:"", industry:"", budget:"", currency:"SAR",
@@ -38,12 +38,43 @@ async function callAPI(systemPrompt, userPrompt) {
   return res.json();
 }
 
+async function pdfToImages(file) {
+  return new Promise((resolve, reject) => {
+    const load = () => {
+      const pdfjsLib = window.pdfjsLib;
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      const reader = new FileReader();
+      reader.onload = async ev => {
+        try {
+          const pdf = await pdfjsLib.getDocument({ data: ev.target.result }).promise;
+          const imgs = [];
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const vp = page.getViewport({ scale: 2 });
+            const canvas = document.createElement("canvas");
+            canvas.width = vp.width; canvas.height = vp.height;
+            await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+            imgs.push(canvas.toDataURL("image/jpeg", 0.92));
+          }
+          resolve(imgs);
+        } catch(e) { reject(e); }
+      };
+      reader.readAsArrayBuffer(file);
+    };
+    if (window.pdfjsLib) { load(); return; }
+    const s = document.createElement("script");
+    s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    s.onload = load;
+    s.onerror = () => reject(new Error("Failed to load PDF.js"));
+    document.head.appendChild(s);
+  });
+}
+
 async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, pdfPages, slideBoxes) {
   const prs = new pptxgen();
   prs.layout = "LAYOUT_WIDE";
   const usePdf = pdfPages && pdfPages.length > 0;
 
-  // build flat slide list same order as UI
   const flatSlides = sections.flatMap(s =>
     s.isDivider ? [{ ...s, type:"divider" }] :
     Array.from({length:s.slides}, (_,i) => ({ ...s, slideIndex:i, type:"content" }))
@@ -51,10 +82,9 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, pdfP
 
   for (let si = 0; si < flatSlides.length; si++) {
     const section = flatSlides[si];
-    const sd = data[section.id] || {};
+    const sd = data?.[section.id] || {};
     const slide = prs.addSlide();
 
-    // background
     if (usePdf) {
       const bgIdx = Math.min(si, pdfPages.length - 1);
       slide.background = { data: pdfPages[bgIdx] };
@@ -72,37 +102,60 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, pdfP
         slide.addText(section.labelAr, { x:1, y:2.9, w:8, h:0.5, fontSize:20, color:"FFFFFF", align:"center", rtlMode:true });
         if (logoDataUrl) slide.addImage({ data:logoDataUrl, x:0.2, y:0.1, w:1.2, h:0.6 });
       }
-      // if pdf, divider slide just shows the pdf page as-is
     } else {
-      const box = usePdf ? (slideBoxes[si] || null) : null;
       const enPts = sd.points_en || [];
       const arPts = sd.points_ar || [];
 
-      if (usePdf && box) {
-        // Convert box from preview % coords to pptx inches
-        const bx = box.x * SLIDE_W;
-        const by = box.y * SLIDE_H;
-        const bw = box.w * SLIDE_W;
-        const bh = box.h * SLIDE_H;
-        const half = bw / 2 - 0.1;
+      if (usePdf) {
+        const box = slideBoxes[si];
+        if (box) {
+          // Convert % coords → pptx inches
+          const bx = box.x * PPTX_W;
+          const by = box.y * PPTX_H;
+          const bw = box.w * PPTX_W;
+          const bh = box.h * PPTX_H;
+          const half = (bw - 0.3) / 2;
+          const midX = bx + half + 0.15;
 
-        // semi-transparent overlay
-        slide.addShape(prs.ShapeType.rect, { x:bx, y:by, w:bw, h:bh,
-          fill:{ color:"FFFFFF", transparency:20 }, line:{ color:"FFFFFF", width:0 } });
+          // White semi-transparent background over the box area
+          slide.addShape(prs.ShapeType.rect, {
+            x:bx, y:by, w:bw, h:bh,
+            fill:{ color:"FFFFFF", transparency:15 },
+            line:{ color:"CCCCCC", width:1 }
+          });
 
-        // EN left half
-        slide.addText(sd.title_en || section.label, { x:bx+0.1, y:by+0.1, w:half, h:0.4, fontSize:13, bold:true, color:"000000" });
-        enPts.forEach((p,i) => slide.addText(`• ${p}`, { x:bx+0.1, y:by+0.6+i*0.38, w:half, h:0.35, fontSize:10, color:"111111" }));
+          // English left half — title + bullets
+          slide.addText(sd.title_en || section.label, {
+            x:bx+0.1, y:by+0.1, w:half, h:0.45,
+            fontSize:12, bold:true, color:"1a1a2e"
+          });
+          slide.addShape(prs.ShapeType.rect, {
+            x:bx+0.1, y:by+0.58, w:Math.min(1.0, half), h:0.03,
+            fill:{ color: tmpl.accent }
+          });
+          enPts.forEach((p, i) => slide.addText(`• ${p}`, {
+            x:bx+0.1, y:by+0.68+i*0.42, w:half, h:0.38,
+            fontSize:10, color:"222222", wrap:true
+          }));
 
-        // divider line
-        slide.addShape(prs.ShapeType.rect, { x:bx+half+0.1, y:by+0.1, w:0.02, h:bh-0.2, fill:{ color:"888888" } });
+          // Center divider line
+          slide.addShape(prs.ShapeType.rect, {
+            x:midX, y:by+0.1, w:0.02, h:bh-0.2,
+            fill:{ color:"BBBBBB" }
+          });
 
-        // AR right half
-        slide.addText(sd.title_ar || section.labelAr, { x:bx+half+0.2, y:by+0.1, w:half, h:0.4, fontSize:13, bold:true, color:"000000", align:"right", rtlMode:true });
-        arPts.forEach((p,i) => slide.addText(`${p} •`, { x:bx+half+0.2, y:by+0.6+i*0.38, w:half, h:0.35, fontSize:10, color:"111111", align:"right", rtlMode:true }));
-
-      } else if (!usePdf) {
-        // built-in template layout
+          // Arabic right half — title + bullets
+          slide.addText(sd.title_ar || section.labelAr, {
+            x:midX+0.15, y:by+0.1, w:half, h:0.45,
+            fontSize:12, bold:true, color:"1a1a2e", align:"right", rtlMode:true
+          });
+          arPts.forEach((p, i) => slide.addText(`${p} •`, {
+            x:midX+0.15, y:by+0.68+i*0.42, w:half, h:0.38,
+            fontSize:10, color:"222222", align:"right", rtlMode:true, wrap:true
+          }));
+        }
+      } else {
+        // Built-in template layout
         slide.addShape(prs.ShapeType.rect, { x:0, y:0, w:"100%", h:0.7, fill:{ color: tmpl.primary } });
         if (logoDataUrl) slide.addImage({ data:logoDataUrl, x:0.2, y:0.05, w:1.0, h:0.55 });
         else slide.addText("SOL", { x:0.2, y:0.1, w:1, h:0.5, fontSize:16, bold:true, color:"FFFFFF" });
@@ -123,36 +176,84 @@ async function exportPPTX(data, tmpl, logoDataUrl, sections, selectedImage, pdfP
   prs.writeFile({ fileName:`SOL_Proposal_${Date.now()}.pptx` });
 }
 
-// PDF to images using canvas
-async function pdfToImages(file) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
-    script.onload = async () => {
-      try {
-        const pdfjsLib = window.pdfjsLib;
-        pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-        const arrayBuffer = await file.arrayBuffer();
-        const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-        const images = [];
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const viewport = page.getViewport({ scale: 2 });
-          const canvas = document.createElement("canvas");
-          canvas.width = viewport.width;
-          canvas.height = viewport.height;
-          await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
-          images.push(canvas.toDataURL("image/jpeg", 0.92));
-        }
-        resolve(images);
-      } catch(e) { reject(e); }
+// --- Drag-to-draw box component ---
+function SlideBoxEditor({ imgSrc, box, onChange, slideIndex }) {
+  const containerRef = useRef();
+  const dragging = useRef(false);
+  const startPt = useRef({});
+  const [liveBox, setLiveBox] = useState(null);
+
+  const getPos = e => {
+    const r = containerRef.current.getBoundingClientRect();
+    const cx = e.touches ? e.touches[0].clientX : e.clientX;
+    const cy = e.touches ? e.touches[0].clientY : e.clientY;
+    return {
+      x: Math.max(0, Math.min(1, (cx - r.left) / r.width)),
+      y: Math.max(0, Math.min(1, (cy - r.top) / r.height))
     };
-    script.onerror = () => reject(new Error("Failed to load PDF.js"));
-    if (!window.pdfjsLib) document.head.appendChild(script);
-    else script.onload();
-  });
+  };
+
+  const onDown = e => { e.preventDefault(); dragging.current = true; startPt.current = getPos(e); setLiveBox(null); };
+  const onMove = e => {
+    if (!dragging.current) return;
+    const p = getPos(e);
+    setLiveBox({
+      x: Math.min(startPt.current.x, p.x),
+      y: Math.min(startPt.current.y, p.y),
+      w: Math.abs(p.x - startPt.current.x),
+      h: Math.abs(p.y - startPt.current.y),
+    });
+  };
+  const onUp = () => {
+    dragging.current = false;
+    if (liveBox && liveBox.w > 0.05 && liveBox.h > 0.05) {
+      onChange(slideIndex, liveBox);
+      setLiveBox(null);
+    }
+  };
+
+  const displayBox = liveBox || box;
+
+  return (
+    <div ref={containerRef} style={{ position:"relative", cursor:"crosshair", userSelect:"none" }}
+      onMouseDown={onDown} onMouseMove={onMove} onMouseUp={onUp}
+      onTouchStart={onDown} onTouchMove={onMove} onTouchEnd={onUp}>
+      <img src={imgSrc} style={{ width:"100%", display:"block", borderRadius:6 }} draggable={false}/>
+      {displayBox && (
+        <div style={{
+          position:"absolute",
+          left:`${displayBox.x*100}%`, top:`${displayBox.y*100}%`,
+          width:`${displayBox.w*100}%`, height:`${displayBox.h*100}%`,
+          border:`2.5px ${liveBox ? "dashed #2563eb" : "solid #16a34a"}`,
+          background: liveBox ? "rgba(37,99,235,0.1)" : "rgba(22,163,74,0.12)",
+          borderRadius:4, pointerEvents:"none", boxSizing:"border-box"
+        }}>
+          <div style={{ position:"absolute", top:2, left:4, fontSize:9, fontWeight:800,
+            color: liveBox ? "#2563eb" : "#16a34a" }}>
+            {liveBox ? "Drawing..." : "✓ Content Area"}
+          </div>
+          {!liveBox && (
+            <div style={{ position:"absolute", inset:0, display:"grid", gridTemplateColumns:"1fr 2px 1fr", padding:"14px 6px 6px", gap:4 }}>
+              <div style={{ background:"rgba(255,255,255,0.7)", borderRadius:3, padding:3 }}>
+                <div style={{ fontSize:7, fontWeight:700, color:"#1a1a2e", marginBottom:2 }}>EN Title</div>
+                <div style={{ fontSize:6, color:"#444" }}>• Bullet point 1</div>
+                <div style={{ fontSize:6, color:"#444" }}>• Bullet point 2</div>
+              </div>
+              <div style={{ background:"#bbb" }}/>
+              <div style={{ background:"rgba(255,255,255,0.7)", borderRadius:3, padding:3 }} dir="rtl">
+                <div style={{ fontSize:7, fontWeight:700, color:"#1a1a2e", marginBottom:2 }}>عنوان</div>
+                <div style={{ fontSize:6, color:"#444" }}>• نقطة ١</div>
+                <div style={{ fontSize:6, color:"#444" }}>• نقطة ٢</div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
+// --- Reusable form components ---
 const Field = ({ label, children }) => (
   <div style={{ marginBottom:14 }}>
     <label style={{ display:"block", fontSize:12, fontWeight:600, color:"#444", marginBottom:4 }}>{label}</label>
@@ -174,74 +275,7 @@ const Select = ({ value, onChange, options }) => (
   </select>
 );
 
-// Drag-to-draw text box on a slide preview
-function SlideBoxEditor({ imgSrc, box, onChange, slideIndex }) {
-  const canvasRef = useRef();
-  const dragging = useRef(false);
-  const startPt = useRef({});
-  const [localBox, setLocalBox] = useState(box || null);
-
-  const getPos = (e, el) => {
-    const r = el.getBoundingClientRect();
-    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    return { x: (clientX - r.left) / r.width, y: (clientY - r.top) / r.height };
-  };
-
-  const onMouseDown = e => {
-    const el = canvasRef.current;
-    const pos = getPos(e, el);
-    dragging.current = true;
-    startPt.current = pos;
-    setLocalBox(null);
-  };
-
-  const onMouseMove = e => {
-    if (!dragging.current) return;
-    const pos = getPos(e, canvasRef.current);
-    const x = Math.min(startPt.current.x, pos.x);
-    const y = Math.min(startPt.current.y, pos.y);
-    const w = Math.abs(pos.x - startPt.current.x);
-    const h = Math.abs(pos.y - startPt.current.y);
-    setLocalBox({ x, y, w, h });
-  };
-
-  const onMouseUp = () => {
-    dragging.current = false;
-    if (localBox && localBox.w > 0.05 && localBox.h > 0.05) onChange(slideIndex, localBox);
-  };
-
-  return (
-    <div style={{ position:"relative", userSelect:"none", cursor:"crosshair" }}
-      onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-      onTouchStart={onMouseDown} onTouchMove={onMouseMove} onTouchEnd={onMouseUp}>
-      <img ref={canvasRef} src={imgSrc} style={{ width:"100%", display:"block", borderRadius:6 }} draggable={false}/>
-      {localBox && (
-        <div style={{
-          position:"absolute",
-          left:`${localBox.x*100}%`, top:`${localBox.y*100}%`,
-          width:`${localBox.w*100}%`, height:`${localBox.h*100}%`,
-          border:"2.5px dashed #2563eb", background:"rgba(37,99,235,0.12)",
-          borderRadius:4, pointerEvents:"none"
-        }}>
-          <span style={{ position:"absolute", top:2, left:4, fontSize:9, color:"#2563eb", fontWeight:700 }}>Text Area</span>
-        </div>
-      )}
-      {!localBox && box && (
-        <div style={{
-          position:"absolute",
-          left:`${box.x*100}%`, top:`${box.y*100}%`,
-          width:`${box.w*100}%`, height:`${box.h*100}%`,
-          border:"2.5px solid #16a34a", background:"rgba(22,163,74,0.1)",
-          borderRadius:4, pointerEvents:"none"
-        }}>
-          <span style={{ position:"absolute", top:2, left:4, fontSize:9, color:"#16a34a", fontWeight:700 }}>✓ Set</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
+// --- Main App ---
 export default function App() {
   const [form, setForm] = useState(initForm);
   const [step, setStep] = useState(1);
@@ -261,12 +295,10 @@ export default function App() {
   const [generatedImages, setGeneratedImages] = useState([]);
   const [imgLoading, setImgLoading] = useState(false);
   const [selectedImage, setSelectedImage] = useState(null);
-  // PDF template state
-  const [pdfPages, setPdfPages] = useState([]); // array of dataURL strings
+  const [pdfPages, setPdfPages] = useState([]);
   const [pdfName, setPdfName] = useState("");
   const [pdfLoading, setPdfLoading] = useState(false);
-  const [slideBoxes, setSlideBoxes] = useState({}); // { slideIndex: {x,y,w,h} }
-  const [editingPdf, setEditingPdf] = useState(false);
+  const [slideBoxes, setSlideBoxes] = useState({});
 
   const fileRef = useRef();
   const pdfFileRef = useRef();
@@ -285,37 +317,28 @@ export default function App() {
     Array.from({length:s.slides}, (_,i) => ({ ...s, slideIndex:i, type:"content" }))
   );
 
-  const handleLogo = (e) => {
+  const handleLogo = e => {
     const file = e.target.files[0]; if (!file) return;
     const r = new FileReader();
     r.onload = ev => { setLogoPreview(ev.target.result); setLogoDataUrl(ev.target.result); };
     r.readAsDataURL(file);
   };
 
-  const handlePdfUpload = async (e) => {
+  const handlePdfUpload = async e => {
     const file = e.target.files[0]; if (!file) return;
-    if (!file.name.endsWith(".pdf")) { alert("Please upload a PDF file"); return; }
+    if (!file.name.toLowerCase().endsWith(".pdf")) { alert("Please upload a PDF file"); return; }
     setPdfLoading(true);
     try {
-      const images = await pdfToImages(file);
-      setPdfPages(images);
+      const imgs = await pdfToImages(file);
+      setPdfPages(imgs);
       setPdfName(file.name);
       setSlideBoxes({});
-      setEditingPdf(true);
-    } catch(err) {
-      alert("Failed to load PDF: " + err.message);
-    } finally {
-      setPdfLoading(false);
-      e.target.value = "";
-    }
-  };
-
-  const handleBoxChange = (slideIndex, box) => {
-    setSlideBoxes(prev => ({ ...prev, [slideIndex]: box }));
+    } catch(err) { alert("Failed to load PDF: " + err.message); }
+    finally { setPdfLoading(false); e.target.value = ""; }
   };
 
   const addSection = () => setSections(s=>[...s,{ id:`s_${Date.now()}`, label:"New Section", labelAr:"قسم جديد", isDivider:false, slides:1 }]);
-  const removeSection = (id) => setSections(s=>s.filter(x=>x.id!==id));
+  const removeSection = id => setSections(s=>s.filter(x=>x.id!==id));
   const updateSection = (id,k,v) => setSections(s=>s.map(x=>x.id===id?{...x,[k]:v}:x));
   const moveSection = (idx,dir) => setSections(s=>{ const a=[...s],sw=idx+dir; if(sw<0||sw>=a.length) return a; [a[idx],a[sw]]=[a[sw],a[idx]]; return a; });
 
@@ -348,32 +371,21 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
     finally { setLoading(false); }
   };
 
-  // FIXED image generator — fetches through proxy, converts blob to dataURL
   const handleGenerateImage = async () => {
     if (!imgPrompt.trim()) return;
-    setImgLoading(true);
-    setError("");
+    setImgLoading(true); setError("");
     try {
       const seed = Math.floor(Math.random()*99999);
       const res = await fetch(`/.netlify/functions/image-proxy?prompt=${encodeURIComponent(imgPrompt.trim())}&seed=${seed}`);
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `Status ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Status ${res.status}`);
       const blob = await res.blob();
       if (!blob.type.startsWith("image/")) throw new Error("Response is not an image");
       const dataUrl = await new Promise((resolve, reject) => {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = reject;
-        r.readAsDataURL(blob);
+        const r = new FileReader(); r.onload = ()=>resolve(r.result); r.onerror = reject; r.readAsDataURL(blob);
       });
-      setGeneratedImages(imgs => [{ url: dataUrl, prompt: imgPrompt }, ...imgs]);
-    } catch(e) {
-      setError("Image generation failed: " + e.message);
-    } finally {
-      setImgLoading(false);
-    }
+      setGeneratedImages(imgs=>[{ url:dataUrl, prompt:imgPrompt }, ...imgs]);
+    } catch(e) { setError("Image generation failed: " + e.message); }
+    finally { setImgLoading(false); }
   };
 
   const handleExport = async () => {
@@ -383,43 +395,54 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
     finally { setExporting(false); }
   };
 
+  // Preview component
   const SlidePreview = () => {
     const slide = flatSlides[activeSlide]; if (!slide) return null;
     const content = data?.[slide.id] || {};
     const bgImg = pdfPages.length ? pdfPages[Math.min(activeSlide, pdfPages.length-1)] : null;
     const box = slideBoxes[activeSlide];
 
+    if (bgImg) {
+      return (
+        <div style={{ position:"relative", borderRadius:10, overflow:"hidden" }}>
+          <img src={bgImg} style={{ width:"100%", display:"block" }}/>
+          {slide.type==="content" && box && (
+            <div style={{
+              position:"absolute",
+              left:`${box.x*100}%`, top:`${box.y*100}%`,
+              width:`${box.w*100}%`, height:`${box.h*100}%`,
+              background:"rgba(255,255,255,0.88)",
+              border:"1.5px solid #ccc", borderRadius:4,
+              display:"grid", gridTemplateColumns:"1fr 2px 1fr",
+              padding:"8px", gap:6, boxSizing:"border-box", overflow:"hidden"
+            }}>
+              <div>
+                <div style={{ fontSize:10, fontWeight:800, color:`#${tmpl.primary}`, marginBottom:4 }}>{content.title_en || slide.label}</div>
+                <div style={{ width:24, height:2, background:`#${tmpl.accent}`, marginBottom:5 }}/>
+                {(content.points_en||[]).map((p,i)=><div key={i} style={{ fontSize:9, color:"#222", marginBottom:3 }}>• {p}</div>)}
+              </div>
+              <div style={{ background:"#ccc" }}/>
+              <div dir="rtl">
+                <div style={{ fontSize:10, fontWeight:800, color:`#${tmpl.primary}`, marginBottom:4 }}>{content.title_ar || slide.labelAr}</div>
+                <div style={{ width:24, height:2, background:`#${tmpl.accent}`, marginBottom:5 }}/>
+                {(content.points_ar||[]).map((p,i)=><div key={i} style={{ fontSize:9, color:"#222", marginBottom:3 }}>{p} •</div>)}
+              </div>
+            </div>
+          )}
+          {slide.type==="content" && !box && (
+            <div style={{ position:"absolute", bottom:8, left:"50%", transform:"translateX(-50%)",
+              background:"rgba(0,0,0,0.65)", color:"#fff", fontSize:10, padding:"5px 12px", borderRadius:20, whiteSpace:"nowrap" }}>
+              ✏️ Go to Template tab → draw content area on this slide
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // built-in template preview
     return (
-      <div style={{ position:"relative", background:`#${tmpl.bg}`, border:`2px solid #${tmpl.primary}20`, borderRadius:10, overflow:"hidden", minHeight:280 }}>
-        {bgImg ? (
-          <div style={{ position:"relative" }}>
-            <img src={bgImg} style={{ width:"100%", display:"block" }}/>
-            {box && (
-              <div style={{
-                position:"absolute",
-                left:`${box.x*100}%`, top:`${box.y*100}%`,
-                width:`${box.w*100}%`, height:`${box.h*100}%`,
-                background:"rgba(255,255,255,0.85)", borderRadius:4, padding:"6px 8px",
-                display:"grid", gridTemplateColumns:"1fr 2px 1fr", gap:4
-              }}>
-                <div>
-                  <div style={{ fontSize:9, fontWeight:700, color:`#${tmpl.primary}`, marginBottom:3 }}>{content.title_en || slide.label}</div>
-                  {(content.points_en||[]).map((p,i)=><div key={i} style={{ fontSize:8, color:"#333" }}>• {p}</div>)}
-                </div>
-                <div style={{ background:"#aaa" }}/>
-                <div dir="rtl">
-                  <div style={{ fontSize:9, fontWeight:700, color:`#${tmpl.primary}`, marginBottom:3 }}>{content.title_ar || slide.labelAr}</div>
-                  {(content.points_ar||[]).map((p,i)=><div key={i} style={{ fontSize:8, color:"#333" }}>{p} •</div>)}
-                </div>
-              </div>
-            )}
-            {!box && slide.type==="content" && (
-              <div style={{ position:"absolute", bottom:8, left:"50%", transform:"translateX(-50%)", background:"rgba(0,0,0,0.6)", color:"#fff", fontSize:10, padding:"4px 10px", borderRadius:20, whiteSpace:"nowrap" }}>
-                ✏️ Draw text area in Template tab
-              </div>
-            )}
-          </div>
-        ) : slide.type==="divider" ? (
+      <div style={{ background:`#${tmpl.bg}`, border:`2px solid #${tmpl.primary}20`, borderRadius:10, overflow:"hidden", minHeight:280 }}>
+        {slide.type==="divider" ? (
           <div style={{ background:`#${tmpl.primary}`, minHeight:280, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:10, position:"relative", overflow:"hidden" }}>
             {selectedImage && <img src={selectedImage} style={{ position:"absolute", inset:0, width:"100%", height:"100%", objectFit:"cover", opacity:0.2 }}/>}
             <div style={{ background:`#${tmpl.accent}`, padding:"12px 32px", borderRadius:6, textAlign:"center", position:"relative" }}>
@@ -457,6 +480,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
 
   return (
     <div style={{ minHeight:"100vh", background:"#f5f6fa", fontFamily:"Arial, sans-serif", direction:isAr?"rtl":"ltr" }}>
+      {/* NAV */}
       <div style={{ background:`#${tmpl.primary}`, padding:"12px 24px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:8 }}>
         <div style={{ color:"#fff", fontWeight:800, fontSize:18 }}>{isAr?"مولّد عروض SOL":"SOL Proposal Generator"}</div>
         <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap" }}>
@@ -468,7 +492,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               {l==="english"?"EN":"ع"}
             </button>
           ))}
-          {[["form","📝 Form","📝 نموذج"],["sections","📋 Sections","📋 أقسام"],["template","🖼 Template","🖼 القالب"]].map(([tab,en,ar])=>(
+          {[["form","📝 Form","📝 نموذج"],["template","🖼 Template","🖼 القالب"],["sections","📋 Sections","📋 أقسام"]].map(([tab,en,ar])=>(
             <button key={tab} onClick={()=>setActiveTab(tab)}
               style={{ padding:"5px 14px", borderRadius:20, border:"none", cursor:"pointer",
                 background:activeTab===tab?"rgba(255,255,255,0.25)":"transparent",
@@ -489,7 +513,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
 
       <div style={{ maxWidth:960, margin:"24px auto", padding:"0 16px" }}>
 
-        {/* FORM */}
+        {/* ── FORM TAB ── */}
         {activeTab==="form" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", marginBottom:20, borderRadius:10, overflow:"hidden", border:`1.5px solid #${tmpl.primary}30` }}>
@@ -502,6 +526,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               ))}
             </div>
 
+            {/* Step 1 — Client Info */}
             {step===1 && <>
               <Field label={isAr?"اسم العميل / الشركة *":"Client / Company Name *"}>
                 <Input value={form.clientName} onChange={v=>set("clientName",v)} placeholder="e.g. Al-Rashid Group"/>
@@ -532,14 +557,14 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                   <input ref={fileRef} type="file" accept="image/*" style={{ display:"none" }} onChange={handleLogo}/>
                 </div>
               </Field>
-              <div style={{ textAlign:isAr?"left":"right" }}>
+              <div style={{ textAlign:"right" }}>
                 <button onClick={()=>setStep(2)} style={btn()}>{isAr?"التالي →":"Next →"}</button>
               </div>
             </>}
 
+            {/* Step 2 — Design & Images */}
             {step===2 && <>
-              {/* only show built-in templates if no PDF uploaded */}
-              {!pdfPages.length && <>
+              {!pdfPages.length ? <>
                 <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎨 {isAr?"اختر تصميماً":"Choose a Design"}</div>
                 <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
                   {DEFAULT_TEMPLATES.map(t=>(
@@ -559,7 +584,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                     <div style={{ fontWeight:700, fontSize:13 }}>🖌 {isAr?"تخصيص الألوان":"Customize Colors"}</div>
                     <button onClick={()=>setEditingColors(!editingColors)}
                       style={{ padding:"4px 10px", borderRadius:6, border:"1px solid #ddd", background:"#fff", fontSize:11, cursor:"pointer" }}>
-                      {editingColors?(isAr?"تم":"Done"):(isAr?"تعديل":"Edit Colors")}
+                      {editingColors?"Done":"Edit Colors"}
                     </button>
                   </div>
                   {editingColors && (
@@ -575,17 +600,20 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                     </div>
                   )}
                 </div>
-              </>}
-
-              {pdfPages.length > 0 && (
-                <div style={{ background:"#f0fdf4", border:"1px solid #86efac", borderRadius:10, padding:12, marginBottom:14, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
-                  <div>
-                    <div style={{ fontWeight:700, fontSize:13, color:"#15803d" }}>✅ PDF Template Active</div>
-                    <div style={{ fontSize:11, color:"#166534" }}>{pdfName} — {pdfPages.length} pages</div>
+                <div style={{ background:"#f0f9ff", border:"1px dashed #06B6D4", borderRadius:10, padding:12, marginBottom:14, textAlign:"center" }}>
+                  <div style={{ fontSize:13, fontWeight:700, marginBottom:6 }}>📄 Or use your own PDF template</div>
+                  <div style={{ fontSize:11, color:"#555", marginBottom:10 }}>Go to the <strong>🖼 Template</strong> tab to upload your PDF and draw content areas</div>
+                  <button onClick={()=>setActiveTab("template")} style={{...btn(), fontSize:12}}>Go to Template Tab →</button>
+                </div>
+              </> : (
+                <div style={{ background:"#f0fdf4", border:"1px solid #86efac", borderRadius:10, padding:14, marginBottom:14 }}>
+                  <div style={{ fontWeight:700, fontSize:13, color:"#15803d", marginBottom:4 }}>✅ PDF Template Active: {pdfName}</div>
+                  <div style={{ fontSize:11, color:"#166534", marginBottom:10 }}>
+                    {Object.keys(slideBoxes).length} of {flatSlides.filter(s=>s.type==="content").length} content slides have text areas drawn.
                   </div>
                   <div style={{ display:"flex", gap:8 }}>
-                    <button onClick={()=>setActiveTab("template")} style={{...btn(), fontSize:11}}>✏️ Edit Text Areas</button>
-                    <button onClick={()=>{setPdfPages([]);setPdfName("");setSlideBoxes({});}} style={{ padding:"6px 12px", borderRadius:7, border:"none", background:"#fee2e2", color:"#c00", fontSize:11, cursor:"pointer" }}>✕ Remove</button>
+                    <button onClick={()=>setActiveTab("template")} style={{...btn(),fontSize:11}}>✏️ Edit Text Areas</button>
+                    <button onClick={()=>{setPdfPages([]);setPdfName("");setSlideBoxes({});}} style={{ padding:"7px 14px", borderRadius:7, border:"none", background:"#fee2e2", color:"#c00", fontSize:11, cursor:"pointer" }}>✕ Remove PDF</button>
                   </div>
                 </div>
               )}
@@ -593,30 +621,26 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               {/* AI Image Generator */}
               <div style={{ background:"#fdf4ff", borderRadius:10, padding:14, marginBottom:14, border:"1px solid #e9d5ff" }}>
                 <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>🖼 {isAr?"إنشاء صور بالذكاء الاصطناعي":"Generate AI Images"}</div>
-                <div style={{ fontSize:11, color:"#666", marginBottom:10 }}>
-                  {isAr?"أنشئ صوراً واختر منها لإضافتها لشرائح الفواصل":"Generate images and pick one to add to your divider slides"}
-                </div>
+                <div style={{ fontSize:11, color:"#666", marginBottom:10 }}>Generate images to use on divider slides</div>
                 <div style={{ display:"flex", gap:8, marginBottom:12 }}>
                   <input value={imgPrompt} onChange={e=>setImgPrompt(e.target.value)}
                     onKeyDown={e=>e.key==="Enter"&&handleGenerateImage()}
-                    placeholder={isAr?"مثال: مكتب حديث في الرياض":"e.g. Modern office in Riyadh, Saudi Arabia"}
+                    placeholder="e.g. Modern office in Riyadh, Saudi Arabia"
                     style={{ flex:1, padding:"8px 12px", border:"1.5px solid #ddd", borderRadius:8, fontSize:12, outline:"none" }}/>
                   <button onClick={handleGenerateImage} disabled={imgLoading||!imgPrompt.trim()}
                     style={{...btn(), fontSize:12, opacity:(imgLoading||!imgPrompt.trim())?.7:1}}>
-                    {imgLoading?"⏳ Loading...":(isAr?"✨ إنشاء":"✨ Generate")}
+                    {imgLoading?"⏳ Loading...":"✨ Generate"}
                   </button>
                 </div>
                 {generatedImages.length > 0 && (
                   <>
-                    <div style={{ fontSize:12, fontWeight:600, color:"#555", marginBottom:8 }}>
-                      {isAr?"اختر صورة:":"Select an image to use:"}
-                    </div>
+                    <div style={{ fontSize:12, fontWeight:600, color:"#555", marginBottom:8 }}>Select an image to use:</div>
                     <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
                       {generatedImages.map((img,i)=>(
                         <div key={i} onClick={()=>setSelectedImage(selectedImage===img.url?null:img.url)}
                           style={{ cursor:"pointer", borderRadius:8, overflow:"hidden", position:"relative",
                             border: selectedImage===img.url?`3px solid #${tmpl.primary}`:"3px solid #eee" }}>
-                          <img src={img.url} alt={img.prompt} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}/>
+                          <img src={img.url} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}/>
                           {selectedImage===img.url && (
                             <div style={{ position:"absolute", top:4, right:4, background:`#${tmpl.primary}`, borderRadius:"50%",
                               width:20, height:20, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#fff" }}>✓</div>
@@ -624,21 +648,19 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                         </div>
                       ))}
                     </div>
-                    {selectedImage && (
-                      <div style={{ marginTop:8, fontSize:11, color:`#${tmpl.primary}`, fontWeight:600 }}>
-                        ✅ {isAr?"تم اختيار الصورة":"Image selected — will appear on divider slides"}
-                      </div>
-                    )}
+                    {selectedImage && <div style={{ marginTop:8, fontSize:11, color:`#${tmpl.primary}`, fontWeight:600 }}>✅ Image selected — will appear on divider slides</div>}
                   </>
                 )}
+                {error && <div style={{ marginTop:8, fontSize:11, color:"#c00" }}>{error}</div>}
               </div>
 
               <div style={{ display:"flex", justifyContent:"space-between" }}>
-                <button onClick={()=>setStep(1)} style={btn(false)}>{isAr?"→ رجوع":"← Back"}</button>
-                <button onClick={()=>setStep(3)} style={btn()}>{isAr?"التالي →":"Next →"}</button>
+                <button onClick={()=>setStep(1)} style={btn(false)}>← Back</button>
+                <button onClick={()=>setStep(3)} style={btn()}>Next →</button>
               </div>
             </>}
 
+            {/* Step 3 — Content */}
             {step===3 && <>
               <Field label={isAr?"الخدمات المقدمة *":"Services Offered *"}>
                 <Textarea value={form.services} onChange={v=>set("services",v)} placeholder="e.g. ERP implementation, IT consulting"/>
@@ -661,77 +683,97 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </Field>
               {error && <div style={{ background:"#fff0f0", border:"1px solid #fcc", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#c00", marginBottom:12 }}>{error}</div>}
               <div style={{ display:"flex", justifyContent:"space-between" }}>
-                <button onClick={()=>setStep(2)} style={btn(false)}>{isAr?"→ رجوع":"← Back"}</button>
+                <button onClick={()=>setStep(2)} style={btn(false)}>← Back</button>
                 <button onClick={generate} disabled={loading} style={{...btn(),opacity:loading?.7:1}}>
-                  {loading?(isAr?"جاري الإنشاء...":"⏳ Generating..."):(isAr?"✨ إنشاء العرض":"✨ Generate Proposal")}
+                  {loading?"⏳ Generating...":"✨ Generate Proposal"}
                 </button>
               </div>
             </>}
           </div>
         )}
 
-        {/* TEMPLATE TAB */}
+        {/* ── TEMPLATE TAB ── */}
         {activeTab==="template" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-              <div style={{ fontWeight:800, fontSize:16 }}>🖼 {isAr?"قالب PDF":"PDF Template"}</div>
-              <button onClick={()=>pdfFileRef.current.click()} style={btn()}>
-                {pdfLoading?"⏳ Loading PDF...":"📂 Upload PDF Template"}
-              </button>
-              <input ref={pdfFileRef} type="file" accept=".pdf" style={{ display:"none" }} onChange={handlePdfUpload}/>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16, flexWrap:"wrap", gap:10 }}>
+              <div>
+                <div style={{ fontWeight:800, fontSize:16, marginBottom:2 }}>🖼 PDF Template</div>
+                <div style={{ fontSize:12, color:"#666" }}>Upload your PDF then draw a content box on each slide</div>
+              </div>
+              <div style={{ display:"flex", gap:8 }}>
+                {pdfPages.length > 0 && (
+                  <button onClick={()=>{setPdfPages([]);setPdfName("");setSlideBoxes({});}}
+                    style={{ padding:"7px 14px", borderRadius:7, border:"none", background:"#fee2e2", color:"#c00", fontSize:12, cursor:"pointer" }}>
+                    ✕ Remove PDF
+                  </button>
+                )}
+                <button onClick={()=>pdfFileRef.current.click()} style={btn()}>
+                  {pdfLoading?"⏳ Loading...":"📂 Upload PDF"}
+                </button>
+                <input ref={pdfFileRef} type="file" accept=".pdf" style={{ display:"none" }} onChange={handlePdfUpload}/>
+              </div>
             </div>
 
             {!pdfPages.length && (
-              <div style={{ textAlign:"center", padding:"40px 20px", color:"#888", border:"2px dashed #ddd", borderRadius:10 }}>
-                <div style={{ fontSize:40, marginBottom:12 }}>📄</div>
-                <div style={{ fontWeight:700, marginBottom:6 }}>Upload your SOL PDF template</div>
-                <div style={{ fontSize:12 }}>Each page will be used as a slide background. You'll draw text areas on each slide.</div>
+              <div style={{ textAlign:"center", padding:"48px 20px", border:"2px dashed #ddd", borderRadius:12, color:"#888" }}>
+                <div style={{ fontSize:48, marginBottom:12 }}>📄</div>
+                <div style={{ fontWeight:700, fontSize:15, marginBottom:6 }}>Upload your SOL PDF template</div>
+                <div style={{ fontSize:12, maxWidth:400, margin:"0 auto" }}>
+                  Each page becomes a slide background. Then click and drag on each slide to mark where the AI should place its content.
+                </div>
               </div>
             )}
 
-            {pdfPages.length > 0 && (
-              <>
-                <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#92400e", marginBottom:16 }}>
-                  💡 <strong>Draw a box</strong> on each slide to mark where AI text should appear. Click and drag to draw.
-                </div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:16 }}>
-                  {flatSlides.map((slide, idx) => {
-                    const pageImg = pdfPages[Math.min(idx, pdfPages.length-1)];
-                    return (
-                      <div key={idx} style={{ border:`2px solid ${slideBoxes[idx]?"#16a34a":"#e0e0e0"}`, borderRadius:10, overflow:"hidden" }}>
-                        <div style={{ background: slideBoxes[idx]?"#f0fdf4":"#f8f9fa", padding:"6px 10px", fontSize:11, fontWeight:700, color: slideBoxes[idx]?"#15803d":"#555", display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-                          <span>Slide {idx+1}: {slide.label.split(" ").slice(0,3).join(" ")}</span>
-                          {slideBoxes[idx] && <span style={{ fontSize:10, color:"#16a34a" }}>✓ Area set</span>}
-                          {slideBoxes[idx] && <button onClick={()=>setSlideBoxes(p=>{const n={...p};delete n[idx];return n;})} style={{ background:"none", border:"none", color:"#c00", cursor:"pointer", fontSize:12 }}>✕ Clear</button>}
-                        </div>
-                        {slide.type === "content" ? (
-                          <SlideBoxEditor imgSrc={pageImg} box={slideBoxes[idx]} onChange={handleBoxChange} slideIndex={idx}/>
-                        ) : (
-                          <div style={{ position:"relative" }}>
-                            <img src={pageImg} style={{ width:"100%", display:"block" }}/>
-                            <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(0,0,0,0.3)" }}>
-                              <span style={{ color:"#fff", fontWeight:700, fontSize:12, background:"rgba(0,0,0,0.5)", padding:"4px 10px", borderRadius:20 }}>§ Divider Slide</span>
-                            </div>
-                          </div>
+            {pdfPages.length > 0 && <>
+              <div style={{ background:"#eff6ff", border:"1px solid #bfdbfe", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#1e40af", marginBottom:16 }}>
+                💡 <strong>Click and drag</strong> on each content slide to draw the area where AI text will appear. Divider slides use the full page as-is.
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"repeat(2,1fr)", gap:16 }}>
+                {flatSlides.map((slide, idx) => {
+                  const pageImg = pdfPages[Math.min(idx, pdfPages.length-1)];
+                  const hasBox = !!slideBoxes[idx];
+                  return (
+                    <div key={idx} style={{ border:`2px solid ${hasBox?"#16a34a":slide.type==="divider"?"#e0e0e0":"#f59e0b"}`, borderRadius:10, overflow:"hidden" }}>
+                      <div style={{ padding:"6px 10px", fontSize:11, fontWeight:700, display:"flex", justifyContent:"space-between", alignItems:"center",
+                        background: hasBox?"#f0fdf4":slide.type==="divider"?"#f8f9fa":"#fffbeb",
+                        color: hasBox?"#15803d":slide.type==="divider"?"#555":"#92400e" }}>
+                        <span>Slide {idx+1}: {slide.label.split(" ").slice(0,3).join(" ")}</span>
+                        <span>{hasBox?"✓ Ready":slide.type==="divider"?"§ Divider":"⚠ Draw box"}</span>
+                        {hasBox && (
+                          <button onClick={()=>setSlideBoxes(p=>{const n={...p};delete n[idx];return n;})}
+                            style={{ background:"none", border:"none", color:"#c00", cursor:"pointer", fontSize:11, marginLeft:4 }}>✕ Clear</button>
                         )}
                       </div>
-                    );
-                  })}
+                      {slide.type==="content" ? (
+                        <SlideBoxEditor imgSrc={pageImg} box={slideBoxes[idx]} onChange={(i,b)=>setSlideBoxes(p=>({...p,[i]:b}))} slideIndex={idx}/>
+                      ) : (
+                        <div style={{ position:"relative" }}>
+                          <img src={pageImg} style={{ width:"100%", display:"block" }}/>
+                          <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(0,0,0,0.25)" }}>
+                            <span style={{ color:"#fff", fontWeight:700, fontSize:12, background:"rgba(0,0,0,0.5)", padding:"4px 12px", borderRadius:20 }}>§ Divider — no text area needed</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+              <div style={{ marginTop:20, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+                <div style={{ fontSize:12, color:"#666" }}>
+                  {Object.keys(slideBoxes).length} / {flatSlides.filter(s=>s.type==="content").length} content slides ready
                 </div>
-                <div style={{ marginTop:16, textAlign:"right" }}>
-                  <button onClick={()=>setActiveTab("form")} style={btn()}>✅ Done — Go to Form</button>
-                </div>
-              </>
-            )}
+                <button onClick={()=>setActiveTab("form")} style={btn()}>✅ Done — Back to Form</button>
+              </div>
+            </>}
           </div>
         )}
 
-        {/* SECTIONS */}
+        {/* ── SECTIONS TAB ── */}
         {activeTab==="sections" && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:20 }}>
-              <div style={{ fontWeight:800, fontSize:16 }}>📋 {isAr?"أقسام العرض":"Proposal Sections"}</div>
-              <button onClick={addSection} style={btn()}>+ {isAr?"إضافة قسم":"Add Section"}</button>
+              <div style={{ fontWeight:800, fontSize:16 }}>📋 Proposal Sections</div>
+              <button onClick={addSection} style={btn()}>+ Add Section</button>
             </div>
             {sections.map((s,idx)=>(
               <div key={s.id} style={{ border:"1.5px solid #e0e0e0", borderRadius:10, padding:12, marginBottom:8, background:s.isDivider?`#${tmpl.primary}08`:"#fff" }}>
@@ -741,12 +783,12 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                   <input value={s.labelAr} onChange={e=>updateSection(s.id,"labelAr",e.target.value)}
                     style={{ padding:"6px 10px", border:"1px solid #ddd", borderRadius:6, fontSize:12, direction:"rtl" }} placeholder="التسمية"/>
                   <div style={{ textAlign:"center" }}>
-                    <div style={{ fontSize:9, color:"#888" }}>{isAr?"شرائح":"Slides"}</div>
+                    <div style={{ fontSize:9, color:"#888" }}>Slides</div>
                     <input type="number" min="1" max="10" value={s.slides} onChange={e=>updateSection(s.id,"slides",parseInt(e.target.value)||1)}
                       style={{ width:46, padding:"4px", border:"1px solid #ddd", borderRadius:6, fontSize:12, textAlign:"center" }}/>
                   </div>
                   <div style={{ textAlign:"center" }}>
-                    <div style={{ fontSize:9, color:"#888" }}>{isAr?"فاصل":"Divider"}</div>
+                    <div style={{ fontSize:9, color:"#888" }}>Divider</div>
                     <input type="checkbox" checked={s.isDivider} onChange={e=>updateSection(s.id,"isDivider",e.target.checked)} style={{ width:16, height:16, cursor:"pointer" }}/>
                   </div>
                   <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
@@ -758,20 +800,20 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             ))}
             <div style={{ marginTop:14, padding:"10px 14px", background:"#fffbeb", borderRadius:8, fontSize:11, color:"#92400e", border:"1px solid #fde68a" }}>
-              💡 {isAr?"الأقسام المميزة كـ'فاصل' ستظهر كشرائح فاصلة":"Sections marked as Divider appear as separator slides in the PPTX"}
+              💡 Sections marked as Divider appear as separator slides in the PPTX
             </div>
           </div>
         )}
 
-        {/* PREVIEW */}
+        {/* ── PREVIEW TAB ── */}
         {activeTab==="preview" && data && (
           <div style={{ background:"#fff", borderRadius:14, padding:28, boxShadow:"0 2px 16px rgba(0,0,0,.08)" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:16 }}>
-              <div style={{ fontWeight:800, fontSize:16, color:`#${tmpl.primary}` }}>{isAr?"معاينة العرض":"Proposal Preview"}</div>
+              <div style={{ fontWeight:800, fontSize:16, color:`#${tmpl.primary}` }}>Proposal Preview</div>
               <div style={{ display:"flex", gap:8 }}>
-                <button onClick={()=>{setData(null);setActiveTab("form");setStep(1);}} style={btn(false)}>✏️ {isAr?"تعديل":"Edit"}</button>
+                <button onClick={()=>{setData(null);setActiveTab("form");setStep(1);}} style={btn(false)}>✏️ Edit</button>
                 <button onClick={handleExport} disabled={exporting} style={{...btn(),opacity:exporting?.7:1}}>
-                  {exporting?"⏳":`⬇️ ${isAr?"تحميل PPTX":"Download PPTX"}`}
+                  {exporting?"⏳":`⬇️ Download PPTX`}
                 </button>
               </div>
             </div>
@@ -787,7 +829,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
             </div>
             <SlidePreview/>
             <div style={{ marginTop:10, padding:"8px 12px", background:"#fffbeb", borderRadius:8, fontSize:10, color:"#92400e", border:"1px solid #fde68a" }}>
-              💡 {isAr?"ملف PPTX يفتح في PowerPoint أو Google Slides":"PPTX opens in PowerPoint. For Google Slides: File → Import Slides"}
+              💡 PPTX opens in PowerPoint. For Google Slides: File → Import Slides
             </div>
             {error && <div style={{ marginTop:8, background:"#fff0f0", border:"1px solid #fcc", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#c00" }}>{error}</div>}
           </div>
