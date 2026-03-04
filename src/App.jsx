@@ -200,26 +200,14 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
     finally { setLoading(false); }
   };
 
-  const handleGenerateImage = async () => {
+  const handleGenerateImage = () => {
     if (!imgPrompt.trim()) return;
-    setImgLoading(true); setError("");
-    try {
-      const encoded = encodeURIComponent(imgPrompt.trim());
-      const seed = Math.floor(Math.random()*99999);
-      const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true&model=flux`;
-      const response = await fetch(url);
-      if (!response.ok) throw new Error("Failed");
-      const blob = await response.blob();
-      const objectUrl = URL.createObjectURL(blob);
-      setGeneratedImages(imgs=>[{ url: objectUrl, prompt:imgPrompt }, ...imgs]);
-    } catch {
-      // Fallback: set URL directly
-      const encoded = encodeURIComponent(imgPrompt.trim());
-      const seed = Math.floor(Math.random()*99999);
-      const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
-      setGeneratedImages(imgs=>[{ url, prompt:imgPrompt }, ...imgs]);
-    }
-    finally { setImgLoading(false); }
+    setImgLoading(true);
+    const encoded = encodeURIComponent(imgPrompt.trim());
+    const seed = Math.floor(Math.random()*99999);
+    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
+    setGeneratedImages(imgs=>[{ url, prompt:imgPrompt }, ...imgs]);
+    setImgLoading(false);
   };
 
   const handleExport = async () => {
@@ -322,6 +310,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               ))}
             </div>
 
+            {/* Step 1 */}
             {step===1 && <>
               <Field label={isAr?"اسم العميل / الشركة *":"Client / Company Name *"}>
                 <Input value={form.clientName} onChange={v=>set("clientName",v)} placeholder="e.g. Al-Rashid Group"/>
@@ -357,6 +346,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             </>}
 
+            {/* Step 2 */}
             {step===2 && <>
               <div style={{ fontWeight:700, fontSize:14, marginBottom:10 }}>🎨 {isAr?"اختر تصميماً":"Choose a Design"}</div>
               <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:16 }}>
@@ -400,7 +390,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               <div style={{ background:"#f0f9ff", borderRadius:10, padding:14, marginBottom:14, border:"1px dashed #06B6D4" }}>
                 <div style={{ fontWeight:700, fontSize:13, marginBottom:4 }}>📁 {isAr?"رفع قالب (PPTX أو PDF)":"Upload Your Template (PPTX or PDF)"}</div>
                 <div style={{ fontSize:11, color:"#555", marginBottom:10 }}>
-                  {isAr?"ارفع قالبك الخاص ليُملأ بالمحتوى المُنشأ بالذكاء الاصطناعي":"Upload your own PPTX or PDF — AI content will be filled into your template"}
+                  {isAr?"ارفع قالبك الخاص ليُملأ بالمحتوى المُنشأ":"Upload your PPTX or PDF — AI content will be filled into your slides"}
                 </div>
                 <div style={{ display:"flex", alignItems:"center", gap:12 }}>
                   <button onClick={()=>templateFileRef.current.click()} style={{...btn(),fontSize:12}}>
@@ -433,11 +423,6 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                     {imgLoading?"⏳":(isAr?"✨ إنشاء":"✨ Generate")}
                   </button>
                 </div>
-                {imgLoading && (
-                  <div style={{ textAlign:"center", padding:"14px 0", color:"#888", fontSize:12 }}>
-                    ⏳ {isAr?"جاري إنشاء الصورة (10-20 ثانية)...":"Generating image (10-20 seconds)..."}
-                  </div>
-                )}
                 {generatedImages.length > 0 && (
                   <>
                     <div style={{ fontSize:12, fontWeight:600, color:"#555", marginBottom:8 }}>
@@ -447,9 +432,13 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                       {generatedImages.map((img,i)=>(
                         <div key={i} onClick={()=>setSelectedImage(selectedImage===img.url?null:img.url)}
                           style={{ cursor:"pointer", borderRadius:8, overflow:"hidden", position:"relative",
-                            border: selectedImage===img.url?`3px solid #${tmpl.primary}`:"3px solid transparent" }}>
-                          <img src={img.url} alt={img.prompt} style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}
-                            onError={e=>{ e.target.style.display="none"; }}/>
+                            border: selectedImage===img.url?`3px solid #${tmpl.primary}`:"3px solid #eee",
+                            background:"#f0f0f0", minHeight:90, display:"flex", alignItems:"center", justifyContent:"center" }}>
+                          <img src={img.url} alt={img.prompt}
+                            style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}
+                            onLoad={e=>{ e.target.style.opacity="1"; e.target.previousSibling&&(e.target.previousSibling.style.display="none"); }}
+                            onError={e=>{ e.target.parentNode.innerHTML='<div style="height:90px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#888;width:100%">⚠️ Failed to load</div>'; }}
+                          />
                           {selectedImage===img.url && (
                             <div style={{ position:"absolute", top:4, right:4, background:`#${tmpl.primary}`, borderRadius:"50%",
                               width:20, height:20, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:"#fff" }}>✓</div>
@@ -472,6 +461,7 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
               </div>
             </>}
 
+            {/* Step 3 */}
             {step===3 && <>
               <Field label={isAr?"الخدمات المقدمة *":"Services Offered *"}>
                 <Textarea value={form.services} onChange={v=>set("services",v)} placeholder="e.g. ERP implementation, IT consulting"/>
