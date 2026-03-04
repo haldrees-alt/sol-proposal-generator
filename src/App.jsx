@@ -200,14 +200,26 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
     finally { setLoading(false); }
   };
 
-  const handleGenerateImage = () => {
+  // FIXED: routes through Netlify proxy instead of calling Pollinations directly
+  const handleGenerateImage = async () => {
     if (!imgPrompt.trim()) return;
     setImgLoading(true);
-    const encoded = encodeURIComponent(imgPrompt.trim());
-    const seed = Math.floor(Math.random()*99999);
-    const url = `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=768&seed=${seed}&nologo=true`;
-    setGeneratedImages(imgs=>[{ url, prompt:imgPrompt }, ...imgs]);
-    setImgLoading(false);
+    try {
+      const seed = Math.floor(Math.random()*99999);
+      const res = await fetch(`/.netlify/functions/image-proxy?prompt=${encodeURIComponent(imgPrompt.trim())}&seed=${seed}`);
+      if (!res.ok) throw new Error("Image generation failed");
+      const blob = await res.blob();
+      const dataUrl = await new Promise(resolve => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.readAsDataURL(blob);
+      });
+      setGeneratedImages(imgs=>[{ url: dataUrl, prompt:imgPrompt }, ...imgs]);
+    } catch(e) {
+      setError("Image generation failed: " + e.message);
+    } finally {
+      setImgLoading(false);
+    }
   };
 
   const handleExport = async () => {
@@ -436,7 +448,6 @@ companyName: "${form.clientName}". IMPORTANT: Valid JSON only, no special charac
                             background:"#f0f0f0", minHeight:90, display:"flex", alignItems:"center", justifyContent:"center" }}>
                           <img src={img.url} alt={img.prompt}
                             style={{ width:"100%", height:90, objectFit:"cover", display:"block" }}
-                            onLoad={e=>{ e.target.style.opacity="1"; e.target.previousSibling&&(e.target.previousSibling.style.display="none"); }}
                             onError={e=>{ e.target.parentNode.innerHTML='<div style="height:90px;display:flex;align-items:center;justify-content:center;font-size:11px;color:#888;width:100%">⚠️ Failed to load</div>'; }}
                           />
                           {selectedImage===img.url && (

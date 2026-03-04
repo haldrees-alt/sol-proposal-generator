@@ -1,52 +1,23 @@
-const Anthropic = require("@anthropic-ai/sdk");
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
 exports.handler = async (event) => {
-  if (event.httpMethod !== "POST") {
-    return { statusCode: 405, body: "Method Not Allowed" };
-  }
+  const prompt = event.queryStringParameters?.prompt || "abstract background";
+  const seed = event.queryStringParameters?.seed || Math.floor(Math.random() * 99999);
 
   try {
-    const { systemPrompt, userPrompt } = JSON.parse(event.body);
+    const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=768&seed=${seed}&nologo=true`;
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("Pollinations fetch failed");
 
-    const msg = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4000,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-    });
-
-    const raw = msg.content[0].text;
-
-    // Find JSON boundaries
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start === -1 || end === -1) throw new Error("No JSON found in response");
-
-    const jsonStr = raw.slice(start, end + 1);
-
-    // Try to parse, if it fails try to clean it
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonStr);
-    } catch (parseErr) {
-      // Clean common issues
-      const cleaned = jsonStr
-        .replace(/,\s*}/g, "}")
-        .replace(/,\s*]/g, "]")
-        .replace(/[\u0000-\u001F\u007F-\u009F]/g, " ");
-      parsed = JSON.parse(cleaned);
-    }
+    const buffer = await response.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    const contentType = response.headers.get("content-type") || "image/jpeg";
 
     return {
       statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(parsed),
+      headers: { "Content-Type": contentType },
+      body: base64,
+      isBase64Encoded: true,
     };
   } catch (err) {
-    return {
-      statusCode: 500,
-      body: JSON.stringify({ error: err.message }),
-    };
+    return { statusCode: 500, body: JSON.stringify({ error: err.message }) };
   }
 };
